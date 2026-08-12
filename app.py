@@ -13,41 +13,55 @@ st.set_page_config(
 )
 
 st.title("📊 Model-Based RL + Online Optimization")
-st.markdown(
-    "Upload an Excel dataset, automatically detect country/year columns, "
-    "impute missing annual values, and download the completed Excel file."
+st.write(
+    "Upload an Excel file, detect annual columns automatically, "
+    "impute missing values, validate the model, and download the result."
 )
 
+# -----------------------------
+# SETTINGS
+# -----------------------------
 st.sidebar.header("Settings")
-start_year = st.sidebar.number_input("Start year", min_value=1900, max_value=2100, value=2015, step=1)
-end_year = st.sidebar.number_input("End year", min_value=1900, max_value=2100, value=2025, step=1)
-n_estimators = st.sidebar.slider("Random Forest trees", 100, 1000, 500, 50)
-alpha = st.sidebar.slider("Online optimization α", 0.01, 0.50, 0.08, 0.01)
-episodes = st.sidebar.slider("Optimization iterations", 10, 500, 100, 10)
-
-uploaded_file = st.file_uploader(
-    "Upload your Excel file (.xlsx or .xls)",
-    type=["xlsx", "xls"]
+start_year = st.sidebar.number_input(
+    "Start year", min_value=1900, max_value=2100, value=2015, step=1
+)
+end_year = st.sidebar.number_input(
+    "End year", min_value=1900, max_value=2100, value=2025, step=1
+)
+n_estimators = st.sidebar.slider(
+    "Random Forest trees", min_value=100, max_value=1000, value=500, step=50
+)
+alpha = st.sidebar.slider(
+    "Online optimization α", min_value=0.01, max_value=0.50, value=0.08, step=0.01
+)
+episodes = st.sidebar.slider(
+    "Optimization iterations", min_value=10, max_value=500, value=100, step=10
 )
 
+# -----------------------------
+# HELPERS
+# -----------------------------
 def detect_country_column(columns):
-    candidates = ["geoUnit", "country", "Country", "country_name", "Country Name", "Entity"]
-    for c in candidates:
-        if c in columns:
-            return c
+    candidates = [
+        "geoUnit", "country", "Country",
+        "country_name", "Country Name", "Entity"
+    ]
+    for col in candidates:
+        if col in columns:
+            return col
     return None
 
-def prepare_dataframe(file):
-    df = pd.read_excel(file)
+
+def load_excel(uploaded_file):
+    df = pd.read_excel(uploaded_file)
     df.columns = df.columns.astype(str).str.strip()
 
     country_col = detect_country_column(df.columns)
     if country_col is None:
-        st.error(
-            "Could not identify the country column. "
-            "Expected one of: geoUnit, country, Country, country_name, Country Name, Entity."
+        raise ValueError(
+            "Country column not detected. Expected one of: "
+            "geoUnit, country, Country, country_name, Country Name, Entity."
         )
-        st.stop()
 
     year_cols = sorted(
         [
@@ -58,85 +72,119 @@ def prepare_dataframe(file):
     )
 
     if not year_cols:
-        st.error(
-            f"No year columns were detected between {start_year} and {end_year}. "
-            "Make sure your Excel file contains columns such as 2015, 2016, ..., 2025."
+        raise ValueError(
+            f"No year columns found between {start_year} and {end_year}."
         )
-        st.stop()
 
-    for c in year_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    for col in year_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
 
     return df, country_col, year_cols
 
-def build_world_model(df, year_cols, n_estimators):
+
+def train_world_model(df, year_cols):
     X, y = [], []
 
-    # Learn temporal transitions: [t-3, t-2, t-1] -> t
     for _, row in df.iterrows():
         values = row[year_cols].to_numpy(dtype=float)
 
-        for i in range(3, len(values)):
-            state = values[i-3:i]
-            target = values[i]
+        # Temporal state:
+        # [t-3, t-2, t-1] -> t
+        for j in range(3, len(values)):
+            state = values[j - 3:j]
+            target = values[j]
 
-            if not np.isnan(state).any() and not np.isnan(target):
-                X.append(state)
-                y.append(target)
+            if np.all(np.isfinite(state)) and np.isfinite(target):
+                X.append(state.tolist())
+                y.append(float(target))
 
     if len(X) < 10:
         return None, 0
 
-    X = np.asarray(X, dtype=float)
-    y = np.asarray(y, dtype=float)
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
 
     model = RandomForestRegressor(
         n_estimators=n_estimators,
         random_state=42,
-        n_jobs=-1,
-        min_samples_leaf=1
+        n_jobs=-1
     )
     model.fit(X, y)
+
     return model, len(X)
 
-def fallback_prediction(values, j, global_mean):
+
+def nearest_neighbor_prediction(values, position, global_mean):
     left = None
     right = None
 
-    for k in range(j - 1, -1, -1):
-        if not np.isnan(values[k]):
-            left = values[k]
+    for k in range(position - 1, -1, -1):
+        if np.isfinite(values[k]):
+            left = float(values[k])
             break
 
-    for k in range(j + 1, len(values)):
-        if not np.isnan(values[k]):
-            right = values[k]
+    for k in range(position + 1, len(values)):
+        if np.isfinite(values[k]):
+            right = float(values[k])
             break
 
     if left is not None and right is not None:
         return (left + right) / 2.0
+
     if left is not None:
         return left
+
     if right is not None:
         return right
 
     row_mean = np.nanmean(values)
-    if not np.isnan(row_mean):
-        return row_mean
+    if np.isfinite(row_mean):
+        return float(row_mean)
 
-    return global_mean
+    return float(global_mean)
 
-def impute_dataframe(df, year_cols, model, alpha, episodes):
+
+def safe_prediction(model, state):
+    """Always return a scalar float or NaN."""
+    pred = model.predict(np.asarray(state, dtype=np.float64).reshape(1, -1))
+    pred = np.asarray(pred).reshape(-1)
+
+    if pred.size == 0:
+        return np.nan
+
+    value = float(pred[0])
+
+    return value if np.isfinite(value) else np.nan
+
+
+def impute_dataframe(df, year_cols, model):
     result = df.copy()
-    original_missing = result[year_cols].isna()
 
-    global_mean = np.nanmean(result[year_cols].to_numpy(dtype=float))
-    if np.isnan(global_mean):
+    # IMPORTANT:
+    # Preserve exactly which cells were missing in the user's upload.
+    original_missing = result[year_cols].isna().copy()
+
+    numeric_matrix = result[year_cols].to_numpy(
+        dtype=np.float64, copy=True
+    )
+
+    global_mean = np.nanmean(numeric_matrix)
+
+    if not np.isfinite(global_mean):
         global_mean = 0.0
 
-    for idx in result.index:
-        values = result.loc[idx, year_cols].to_numpy(dtype=float)
-        missing_mask = original_missing.loc[idx].to_numpy(dtype=bool)
+    for row_number in range(len(result)):
+        # Explicit float array prevents:
+        # "setting an array element with a sequence"
+        values = np.asarray(
+            numeric_matrix[row_number],
+            dtype=np.float64
+        ).copy()
+
+        missing_mask = np.asarray(
+            original_missing.iloc[row_number].to_numpy(),
+            dtype=bool
+        )
 
         if not missing_mask.any():
             continue
@@ -145,63 +193,96 @@ def impute_dataframe(df, year_cols, model, alpha, episodes):
             previous = values.copy()
 
             for j in range(len(values)):
+                # Never modify an originally observed value.
                 if not missing_mask[j]:
                     continue
 
                 prediction = np.nan
 
-                # Model-based world-model prediction
+                # -----------------------------
+                # WORLD MODEL
+                # -----------------------------
                 if model is not None and j >= 3:
-                    state = values[j-3:j]
-                    if not np.isnan(state).any():
-                        prediction = float(model.predict(state.reshape(1, -1))[0])
+                    state = values[j - 3:j]
 
-                # Fallback for beginning gaps or unavailable state
-                if np.isnan(prediction):
-                    prediction = fallback_prediction(values, j, global_mean)
+                    if np.all(np.isfinite(state)):
+                        prediction = safe_prediction(model, state)
 
-                if np.isnan(values[j]):
-                    values[j] = prediction
+                # -----------------------------
+                # FALLBACK
+                # -----------------------------
+                if not np.isfinite(prediction):
+                    prediction = nearest_neighbor_prediction(
+                        values, j, global_mean
+                    )
+
+                if not np.isfinite(prediction):
+                    prediction = float(global_mean)
+
+                # -----------------------------
+                # MODEL-BASED RL + ONLINE UPDATE
+                # -----------------------------
+                if not np.isfinite(values[j]):
+                    values[j] = float(prediction)
                 else:
-                    # Online optimization update
-                    values[j] = values[j] + alpha * (prediction - values[j])
+                    updated = (
+                        values[j]
+                        + alpha * (float(prediction) - values[j])
+                    )
 
-            if np.all(~np.isnan(values)):
+                    if np.isfinite(updated):
+                        values[j] = float(updated)
+
+            finite_values = values[np.isfinite(values)]
+
+            if len(finite_values) == len(values):
                 break
 
-            diff = np.nanmax(np.abs(values - previous))
-            if not np.isfinite(diff) or diff < 1e-6:
-                break
+            if np.all(np.isfinite(previous)) and np.all(np.isfinite(values)):
+                diff = np.max(np.abs(values - previous))
+                if diff < 1e-6:
+                    break
 
-        result.loc[idx, year_cols] = np.round(values, 3)
+        numeric_matrix[row_number] = values
+
+    result.loc[:, year_cols] = np.round(numeric_matrix, 3)
 
     return result
 
-def validation(df, year_cols, model, seed=42):
-    # Mask a subset of observed interior values and predict them.
-    rng = np.random.default_rng(seed)
-    actual, predicted = [], []
+
+def validation(df, year_cols, model):
+    if model is None:
+        return None
+
+    rng = np.random.default_rng(42)
+    actual = []
+    predicted = []
 
     for _, row in df.iterrows():
         values = row[year_cols].to_numpy(dtype=float)
 
-        candidate = [
-            i for i in range(3, len(values))
-            if not np.isnan(values[i])
-            and not np.isnan(values[i-3:i]).any()
+        candidates = [
+            j for j in range(3, len(values))
+            if np.isfinite(values[j])
+            and np.all(np.isfinite(values[j - 3:j]))
         ]
 
-        if not candidate:
+        if not candidates:
             continue
 
-        n_test = max(1, int(0.2 * len(candidate)))
-        test_idx = rng.choice(candidate, size=n_test, replace=False)
+        test_count = max(1, int(0.20 * len(candidates)))
+        test_positions = rng.choice(
+            candidates,
+            size=min(test_count, len(candidates)),
+            replace=False
+        )
 
-        for j in test_idx:
-            state = values[j-3:j]
-            pred = float(model.predict(state.reshape(1, -1))[0])
-            actual.append(values[j])
-            predicted.append(pred)
+        for j in test_positions:
+            pred = safe_prediction(model, values[j - 3:j])
+
+            if np.isfinite(pred):
+                actual.append(float(values[j]))
+                predicted.append(float(pred))
 
     if len(actual) < 2:
         return None
@@ -211,145 +292,219 @@ def validation(df, year_cols, model, seed=42):
     r2 = r2_score(actual, predicted) if len(set(actual)) > 1 else np.nan
 
     return {
-        "MAE": mae,
-        "RMSE": rmse,
-        "R²": r2,
+        "MAE": float(mae),
+        "RMSE": float(rmse),
+        "R²": float(r2),
         "Validation samples": len(actual)
     }
 
-if uploaded_file is not None:
-    df, country_col, year_cols = prepare_dataframe(uploaded_file)
 
-    st.success(f"File loaded: {uploaded_file.name}")
+# -----------------------------
+# APPLICATION
+# -----------------------------
+uploaded_file = st.file_uploader(
+    "Upload your Excel file",
+    type=["xlsx", "xls"]
+)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Rows", len(df))
-    c2.metric("Year columns", len(year_cols))
-    c3.metric("Missing values", int(df[year_cols].isna().sum().sum()))
+if uploaded_file is None:
+    st.info("Upload an Excel file to begin.")
+    st.markdown(
+        """
+        **Expected format**
 
-    st.subheader("Input dataset")
-    st.dataframe(df, use_container_width=True, height=400)
+        `geoUnit | 2015 | 2016 | ... | 2025`
 
-    st.write("**Detected country column:**", country_col)
-    st.write("**Detected years:**", ", ".join(year_cols))
-
-    if st.button("🚀 Run Model-Based RL + Online Optimization", type="primary"):
-        before_missing = int(df[year_cols].isna().sum().sum())
-
-        with st.spinner("Training world model..."):
-            world_model, samples = build_world_model(
-                df, year_cols, n_estimators
-            )
-
-        if world_model is None:
-            st.error(
-                "There are not enough complete temporal sequences to train "
-                "the Random Forest world model. At least 10 valid training "
-                "samples are recommended."
-            )
-            st.stop()
-
-        st.info(f"World model trained using {samples:,} temporal training samples.")
-
-        with st.spinner("Imputing missing values and running online optimization..."):
-            df_imputed = impute_dataframe(
-                df, year_cols, world_model, alpha, episodes
-            )
-
-        after_missing = int(df_imputed[year_cols].isna().sum().sum())
-        filled = before_missing - after_missing
-
-        st.subheader("Results")
-        r1, r2, r3 = st.columns(3)
-        r1.metric("Missing BEFORE", before_missing)
-        r2.metric("Missing AFTER", after_missing)
-        r3.metric("Values filled", filled)
-
-        st.subheader("Before vs After")
-        st.dataframe(
-            pd.concat(
-                [
-                    df[[country_col] + year_cols].assign(Status="BEFORE"),
-                    df_imputed[[country_col] + year_cols].assign(Status="AFTER")
-                ],
-                ignore_index=True
-            ),
-            use_container_width=True,
-            height=500
-        )
-
-        if after_missing > 0:
-            st.warning(
-                "Some values remain missing because the uploaded dataset "
-                "does not contain enough information to estimate them."
-            )
-
-        metrics = validation(df, year_cols, world_model)
-        if metrics:
-            st.subheader("Validation metrics")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("MAE", f"{metrics['MAE']:.4f}")
-            m2.metric("RMSE", f"{metrics['RMSE']:.4f}")
-            m3.metric("R²", f"{metrics['R²']:.4f}" if np.isfinite(metrics["R²"]) else "N/A")
-            m4.metric("Validation samples", metrics["Validation samples"])
-
-        # Downloadable Excel file
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Original_Data", index=False)
-            df_imputed.to_excel(writer, sheet_name="Imputed_Data", index=False)
-
-            summary = pd.DataFrame({
-                "Metric": [
-                    "Original missing values",
-                    "Remaining missing values",
-                    "Values filled",
-                    "Training samples",
-                    "Alpha",
-                    "Episodes",
-                    "Random Forest trees"
-                ],
-                "Value": [
-                    before_missing,
-                    after_missing,
-                    filled,
-                    samples,
-                    alpha,
-                    episodes,
-                    n_estimators
-                ]
-            })
-            summary.to_excel(writer, sheet_name="Summary", index=False)
-
-        output.seek(0)
-
-        st.download_button(
-            label="⬇️ Download Imputed Excel File",
-            data=output.getvalue(),
-            file_name="Model_Based_RL_Online_Optimization_Imputed.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-        st.success(
-            "Processing completed. The original data and imputed data are "
-            "included in the downloadable Excel workbook."
-        )
+        Existing values are preserved. Only cells that were missing in
+        the uploaded file are imputed.
+        """
+    )
 else:
-    st.info("Upload an Excel file above to begin.")
-    st.markdown("""
-### Expected Excel structure
+    try:
+        df, country_col, year_cols = load_excel(uploaded_file)
 
-The application works with a wide-format table such as:
+        before_missing = int(
+            df[year_cols].isna().sum().sum()
+        )
 
-| geoUnit | 2015 | 2016 | 2017 | ... | 2025 |
-|---|---:|---:|---:|---:|---:|
-| Angola | 10.2 | NaN | 11.4 | ... | 15.1 |
-| Botswana | 8.1 | 8.5 | NaN | ... | 12.7 |
+        st.success(f"File loaded: {uploaded_file.name}")
 
-**Important:** Existing observed values are never overwritten. Only values that were missing in the uploaded file are changed.
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Rows", len(df))
+        c2.metric("Detected years", len(year_cols))
+        c3.metric("Missing values", before_missing)
 
-The downloaded workbook contains:
-- `Original_Data`
-- `Imputed_Data`
-- `Summary`
-""")
+        st.write("**Country column:**", country_col)
+        st.write("**Detected years:**", ", ".join(year_cols))
+
+        with st.expander("View uploaded dataset"):
+            st.dataframe(df, use_container_width=True)
+
+        if st.button(
+            "🚀 Run Model-Based RL + Online Optimization",
+            type="primary"
+        ):
+            with st.spinner("Training temporal world model..."):
+                world_model, training_samples = train_world_model(
+                    df, year_cols
+                )
+
+            if world_model is None:
+                st.error(
+                    "Not enough complete temporal sequences to train "
+                    "the world model. At least 10 training samples are required."
+                )
+                st.stop()
+
+            st.info(
+                f"World model trained using "
+                f"{training_samples:,} temporal training samples."
+            )
+
+            with st.spinner(
+                "Imputing missing values and running online optimization..."
+            ):
+                df_imputed = impute_dataframe(
+                    df, year_cols, world_model
+                )
+
+            after_missing = int(
+                df_imputed[year_cols].isna().sum().sum()
+            )
+            filled = before_missing - after_missing
+
+            st.subheader("Results")
+
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Missing BEFORE", before_missing)
+            r2.metric("Missing AFTER", after_missing)
+            r3.metric("Values filled", filled)
+
+            if after_missing == 0:
+                st.success("All missing year values were successfully filled.")
+            else:
+                st.warning(
+                    f"{after_missing} values remain missing because the "
+                    "uploaded data did not provide enough usable information."
+                )
+
+            st.subheader("Imputed Dataset")
+            st.dataframe(df_imputed, use_container_width=True, height=500)
+
+            metrics = validation(
+                df, year_cols, world_model
+            )
+
+            if metrics:
+                st.subheader("Validation Metrics")
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("MAE", f"{metrics['MAE']:.4f}")
+                m2.metric("RMSE", f"{metrics['RMSE']:.4f}")
+
+                if np.isfinite(metrics["R²"]):
+                    m3.metric("R²", f"{metrics['R²']:.4f}")
+                else:
+                    m3.metric("R²", "N/A")
+
+                m4.metric(
+                    "Validation samples",
+                    metrics["Validation samples"]
+                )
+
+            # -----------------------------
+            # DOWNLOAD EXCEL
+            # -----------------------------
+            output = io.BytesIO()
+
+            with pd.ExcelWriter(
+                output,
+                engine="openpyxl"
+            ) as writer:
+
+                df.to_excel(
+                    writer,
+                    sheet_name="Original_Data",
+                    index=False
+                )
+
+                df_imputed.to_excel(
+                    writer,
+                    sheet_name="Imputed_Data",
+                    index=False
+                )
+
+                summary_data = {
+                    "Metric": [
+                        "Original missing values",
+                        "Remaining missing values",
+                        "Values filled",
+                        "Training samples",
+                        "Start year",
+                        "End year",
+                        "Random Forest trees",
+                        "Online optimization alpha",
+                        "Optimization iterations"
+                    ],
+                    "Value": [
+                        before_missing,
+                        after_missing,
+                        filled,
+                        training_samples,
+                        start_year,
+                        end_year,
+                        n_estimators,
+                        alpha,
+                        episodes
+                    ]
+                }
+
+                if metrics:
+                    summary_data["Metric"].extend([
+                        "Validation MAE",
+                        "Validation RMSE",
+                        "Validation R²",
+                        "Validation samples"
+                    ])
+
+                    summary_data["Value"].extend([
+                        metrics["MAE"],
+                        metrics["RMSE"],
+                        metrics["R²"],
+                        metrics["Validation samples"]
+                    ])
+
+                pd.DataFrame(summary_data).to_excel(
+                    writer,
+                    sheet_name="Summary",
+                    index=False
+                )
+
+            output.seek(0)
+
+            st.download_button(
+                label="⬇️ Download Imputed Excel File",
+                data=output.getvalue(),
+                file_name=(
+                    "Model_Based_RL_Online_Optimization_Imputed.xlsx"
+                ),
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                )
+            )
+
+            st.success(
+                "Processing complete. Your original and imputed datasets "
+                "are available in the Excel download."
+            )
+
+    except Exception as e:
+        st.error(
+            "The uploaded file could not be processed. "
+            "Please check that it is a valid Excel file and that it contains "
+            "a country column and year columns."
+        )
+
+        # Show a safe diagnostic to the user without exposing file contents.
+        st.exception(e)
