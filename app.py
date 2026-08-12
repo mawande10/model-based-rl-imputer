@@ -218,123 +218,122 @@ def validation(df, year_cols, model, seed=42):
     }
 
 if uploaded_file is not None:
-    try:
-        df, country_col, year_cols = prepare_dataframe(uploaded_file)
+    df, country_col, year_cols = prepare_dataframe(uploaded_file)
 
-        st.success(f"File loaded: {uploaded_file.name}")
+    st.success(f"File loaded: {uploaded_file.name}")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Rows", len(df))
-        c2.metric("Year columns", len(year_cols))
-        c3.metric("Missing values", int(df[year_cols].isna().sum().sum()))
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Rows", len(df))
+    c2.metric("Year columns", len(year_cols))
+    c3.metric("Missing values", int(df[year_cols].isna().sum().sum()))
 
-        st.subheader("Input dataset")
-        st.dataframe(df, use_container_width=True, height=400)
+    st.subheader("Input dataset")
+    st.dataframe(df, use_container_width=True, height=400)
 
-        st.write("**Detected country column:**", country_col)
-        st.write("**Detected years:**", ", ".join(year_cols))
+    st.write("**Detected country column:**", country_col)
+    st.write("**Detected years:**", ", ".join(year_cols))
 
-        if st.button("🚀 Run Model-Based RL + Online Optimization", type="primary"):
-            before_missing = int(df[year_cols].isna().sum().sum())
+    if st.button("🚀 Run Model-Based RL + Online Optimization", type="primary"):
+        before_missing = int(df[year_cols].isna().sum().sum())
 
-            with st.spinner("Training world model..."):
-                world_model, samples = build_world_model(
-                    df, year_cols, n_estimators
-                )
-
-            if world_model is None:
-                st.error(
-                    "There are not enough complete temporal sequences to train "
-                    "the Random Forest world model. At least 10 valid training "
-                    "samples are recommended."
-                )
-                st.stop()
-
-            st.info(f"World model trained using {samples:,} temporal training samples.")
-
-            with st.spinner("Imputing missing values and running online optimization..."):
-                df_imputed = impute_dataframe(
-                    df, year_cols, world_model, alpha, episodes
-                )
-
-            after_missing = int(df_imputed[year_cols].isna().sum().sum())
-            filled = before_missing - after_missing
-
-            st.subheader("Results")
-            r1, r2, r3 = st.columns(3)
-            r1.metric("Missing BEFORE", before_missing)
-            r2.metric("Missing AFTER", after_missing)
-            r3.metric("Values filled", filled)
-
-            st.subheader("Before vs After")
-            st.dataframe(
-                pd.concat(
-                    [
-                        df[[country_col] + year_cols].assign(Status="BEFORE"),
-                        df_imputed[[country_col] + year_cols].assign(Status="AFTER")
-                    ],
-                    ignore_index=True
-                ),
-                use_container_width=True,
-                height=500
+        with st.spinner("Training world model..."):
+            world_model, samples = build_world_model(
+                df, year_cols, n_estimators
             )
 
-            if after_missing > 0:
-                st.warning(
-                    "Some values remain missing because the uploaded dataset "
-                    "does not contain enough information to estimate them."
-                )
+        if world_model is None:
+            st.error(
+                "There are not enough complete temporal sequences to train "
+                "the Random Forest world model. At least 10 valid training "
+                "samples are recommended."
+            )
+            st.stop()
 
-            metrics = validation(df, year_cols, world_model)
-            if metrics:
-                st.subheader("Validation metrics")
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("MAE", f"{metrics['MAE']:.4f}")
-                m2.metric("RMSE", f"{metrics['RMSE']:.4f}")
-                m3.metric("R²", f"{metrics['R²']:.4f}" if np.isfinite(metrics["R²"]) else "N/A")
-                m4.metric("Validation samples", metrics["Validation samples"])
+        st.info(f"World model trained using {samples:,} temporal training samples.")
 
-            # Downloadable Excel file
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, sheet_name="Original_Data", index=False)
-                df_imputed.to_excel(writer, sheet_name="Imputed_Data", index=False)
-
-                summary = pd.DataFrame({
-                    "Metric": [
-                        "Original missing values",
-                        "Remaining missing values",
-                        "Values filled",
-                        "Training samples",
-                        "Alpha",
-                        "Episodes",
-                        "Random Forest trees"
-                    ],
-                    "Value": [
-                        before_missing,
-                        after_missing,
-                        filled,
-                        samples,
-                        alpha,
-                        episodes,
-                        n_estimators
-                    ]
-                })
-                summary.to_excel(writer, sheet_name="Summary", index=False)
-
-            output.seek(0)
-
-            st.download_button(
-                label="⬇️ Download Imputed Excel File",
-                data=output.getvalue(),
-                file_name="Model_Based_RL_Online_Optimization_Imputed.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        with st.spinner("Imputing missing values and running online optimization..."):
+            df_imputed = impute_dataframe(
+                df, year_cols, world_model, alpha, episodes
             )
 
-            st.success(
-                "Processing completed. The original data and imputed data are "
-                "included in the downloadable Excel workbook."
+        after_missing = int(df_imputed[year_cols].isna().sum().sum())
+        filled = before_missing - after_missing
+
+        st.subheader("Results")
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Missing BEFORE", before_missing)
+        r2.metric("Missing AFTER", after_missing)
+        r3.metric("Values filled", filled)
+
+        st.subheader("Before vs After")
+        st.dataframe(
+            pd.concat(
+                [
+                    df[[country_col] + year_cols].assign(Status="BEFORE"),
+                    df_imputed[[country_col] + year_cols].assign(Status="AFTER")
+                ],
+                ignore_index=True
+            ),
+            use_container_width=True,
+            height=500
+        )
+
+        if after_missing > 0:
+            st.warning(
+                "Some values remain missing because the uploaded dataset "
+                "does not contain enough information to estimate them."
             )
+
+        metrics = validation(df, year_cols, world_model)
+        if metrics:
+            st.subheader("Validation metrics")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("MAE", f"{metrics['MAE']:.4f}")
+            m2.metric("RMSE", f"{metrics['RMSE']:.4f}")
+            m3.metric("R²", f"{metrics['R²']:.4f}" if np.isfinite(metrics["R²"]) else "N/A")
+            m4.metric("Validation samples", metrics["Validation samples"])
+
+        # Downloadable Excel file
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="Original_Data", index=False)
+            df_imputed.to_excel(writer, sheet_name="Imputed_Data", index=False)
+
+            summary = pd.DataFrame({
+                "Metric": [
+                    "Original missing values",
+                    "Remaining missing values",
+                    "Values filled",
+                    "Training samples",
+                    "Alpha",
+                    "Episodes",
+                    "Random Forest trees"
+                ],
+                "Value": [
+                    before_missing,
+                    after_missing,
+                    filled,
+                    samples,
+                    alpha,
+                    episodes,
+                    n_estimators
+                ]
+            })
+            summary.to_excel(writer, sheet_name="Summary", index=False)
+
+        output.seek(0)
+
+        st.download_button(
+            label="⬇️ Download Imputed Excel File",
+            data=output.getvalue(),
+            file_name="Model_Based_RL_Online_Optimization_Imputed.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        st.success(
+            "Processing completed. The original data and imputed data are "
+            "included in the downloadable Excel workbook."
+        )
 else:
     st.info("Upload an Excel file above to begin.")
     st.markdown("""
