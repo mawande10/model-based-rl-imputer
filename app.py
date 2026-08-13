@@ -1,9 +1,3 @@
-# ============================================================
-# MODEL-BASED RL + ONLINE OPTIMIZATION
-# AFRICAN COUNTRY EXCEL IMPUTER
-# Streamlit Community Cloud
-# ============================================================
-
 import io
 import hashlib
 
@@ -15,18 +9,18 @@ from sklearn.ensemble import RandomForestRegressor
 
 
 # ============================================================
-# STREAMLIT PAGE CONFIGURATION
+# PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
-    page_title="African Model-Based RL Imputer",
+    page_title="Model-Based RL + Online Optimization Imputer",
     page_icon="🔄",
-    layout="wide"
+    layout="wide",
 )
 
 
 # ============================================================
-# AFRICAN COUNTRIES — ISO-3
+# AFRICAN COUNTRY LIST
 # ============================================================
 
 ALL_AFRICA = {
@@ -39,85 +33,75 @@ ALL_AFRICA = {
     "TZA", "TGO", "TUN", "UGA", "ZMB", "ZWE"
 }
 
+
 AFRICA_YEARS = [
-    str(y) for y in range(2015, 2026)
+    str(y)
+    for y in range(2015, 2026)
 ]
 
 
 # ============================================================
-# GENERAL SETTINGS
+# GENERAL UTILITIES
 # ============================================================
 
-DEFAULT_ALPHA = 0.08
-DEFAULT_EPISODES = 200
-DEFAULT_TREES = 500
+def normalize_columns(df):
+
+    output = df.copy()
+
+    output.columns = [
+        str(column).strip()
+        for column in output.columns
+    ]
+
+    return output
 
 
-# ============================================================
-# SAFE WORLD-MODEL PREDICTION
-# ============================================================
-
-def safe_prediction(model, state):
-    """
-    Always return a single scalar float from the Random Forest.
-
-    This prevents errors such as:
-
-        ValueError:
-        setting an array element with a sequence
-    """
-
-    state = np.asarray(
-        state,
-        dtype=float
-    ).reshape(1, -1)
-
-    prediction = model.predict(state)
-
-    prediction = np.asarray(
-        prediction,
-        dtype=float
-    ).reshape(-1)
-
-    if len(prediction) == 0:
-        return np.nan
-
-    return float(prediction[0])
-
-
-# ============================================================
-# DETECT YEAR COLUMNS
-# ============================================================
-
-def detect_year_columns(
+def validate_dataset(
     df,
-    start_year=2015,
-    end_year=2025
+    country_col="geoUnit"
 ):
 
-    columns = [
-        str(c)
-        for c in df.columns
-    ]
+    if country_col not in df.columns:
 
-    years = [
-        str(y)
-        for y in range(
-            start_year,
-            end_year + 1
+        raise ValueError(
+            f"Required country column '{country_col}' "
+            f"was not found."
         )
+
+    missing_year_columns = [
+        year
+        for year in AFRICA_YEARS
+        if year not in df.columns
     ]
 
-    available = [
-        y for y in years
-        if y in columns
-    ]
+    if missing_year_columns:
 
-    return available
+        raise ValueError(
+            "The uploaded Excel file is missing the "
+            "following required year columns: "
+            + ", ".join(missing_year_columns)
+        )
+
+
+def make_numeric_year_data(
+    df,
+    year_cols
+):
+
+    output = df.copy()
+
+    for column in year_cols:
+
+        output[column] = pd.to_numeric(
+            output[column],
+            errors="coerce"
+        )
+
+    return output
 
 
 # ============================================================
-# DETECT MISSING AFRICAN COUNTRIES
+# STEP 2 — DETECT COMPLETELY MISSING AFRICAN COUNTRIES
 # ============================================================
 
 def detect_missing_african_countries(
@@ -130,17 +114,20 @@ def detect_missing_african_countries(
     """
 
     if country_col not in df.columns:
+
         raise ValueError(
             f"Required country column "
             f"'{country_col}' was not found."
         )
 
     existing = set(
+
         df[country_col]
         .dropna()
         .astype(str)
         .str.strip()
         .str.upper()
+
     )
 
     missing = sorted(
@@ -151,7 +138,7 @@ def detect_missing_african_countries(
 
 
 # ============================================================
-# TRAIN COUNTRY-LEVEL WORLD MODEL
+# STEP 4 — TRAIN COUNTRY-LEVEL WORLD MODEL
 # ============================================================
 
 def train_country_world_model(
@@ -161,56 +148,47 @@ def train_country_world_model(
     n_estimators=500
 ):
 
+    """
+    Train a temporal world model.
+
+    State:
+
+        [t-3, t-2, t-1]
+
+    Target:
+
+        t
+
+    Example:
+
+        2015, 2016, 2017 -> 2018
+        2016, 2017, 2018 -> 2019
+        etc.
+    """
+
     if year_cols is None:
+
         year_cols = AFRICA_YEARS
 
-    data = df.copy()
-
-    # --------------------------------------------------------
-    # Ensure required columns exist
-    # --------------------------------------------------------
-
-    valid_year_cols = [
-        col for col in year_cols
-        if col in data.columns
-    ]
-
-    if len(valid_year_cols) < 4:
-        raise ValueError(
-            "At least four year columns are required "
-            "to train the temporal world model."
-        )
-
-    # --------------------------------------------------------
-    # Convert years to numeric
-    # --------------------------------------------------------
-
-    for col in valid_year_cols:
-        data[col] = pd.to_numeric(
-            data[col],
-            errors="coerce"
-        )
+    data = make_numeric_year_data(
+        df,
+        year_cols
+    )
 
     X = []
     y = []
 
     # --------------------------------------------------------
-    # Temporal training samples
-    #
-    # Example:
-    #
-    # 2015 2016 2017 -> 2018
-    # 2016 2017 2018 -> 2019
-    # 2017 2018 2019 -> 2020
-    # ...
+    # CREATE TEMPORAL TRAINING SAMPLES
     # --------------------------------------------------------
 
     for _, row in data.iterrows():
 
         values = row[
-            valid_year_cols
+            year_cols
         ].to_numpy(
-            dtype=float
+            dtype=float,
+            copy=True
         )
 
         for i in range(
@@ -244,19 +222,24 @@ def train_country_world_model(
     )
 
     if len(X) < 5:
+
         raise ValueError(
             "Not enough complete temporal observations "
-            "to train the world model."
+            "to train the world model. At least 5 "
+            "complete training samples are required."
         )
 
-    # --------------------------------------------------------
-    # Random Forest World Model
-    # --------------------------------------------------------
-
     model = RandomForestRegressor(
-        n_estimators=n_estimators,
+
+        n_estimators=int(
+            n_estimators
+        ),
+
         random_state=42,
-        n_jobs=-1
+
+        n_jobs=-1,
+
+        min_samples_leaf=1
     )
 
     model.fit(
@@ -268,125 +251,607 @@ def train_country_world_model(
 
 
 # ============================================================
-# EMPIRICAL COUNTRY-SPECIFIC INITIAL STATE
+# SAFE MODEL PREDICTION
+# ============================================================
+
+def safe_predict(
+    model,
+    state
+):
+
+    state = np.asarray(
+        state,
+        dtype=float
+    )
+
+    if state.shape != (3,):
+
+        return np.nan
+
+    if np.isnan(state).any():
+
+        return np.nan
+
+    prediction = model.predict(
+        state.reshape(1, -1)
+    )
+
+    prediction = float(
+        np.asarray(
+            prediction
+        ).reshape(-1)[0]
+    )
+
+    return prediction
+
+
+# ============================================================
+# GLOBAL MEAN
+# ============================================================
+
+def robust_global_mean(
+    data,
+    year_cols
+):
+
+    values = data[
+        year_cols
+    ].to_numpy(
+        dtype=float
+    )
+
+    value = np.nanmean(
+        values
+    )
+
+    if np.isfinite(value):
+
+        return float(value)
+
+    return 0.0
+
+
+# ============================================================
+# NEAREST PREVIOUS VALUE
+# ============================================================
+
+def get_nearest_left(
+    values,
+    j
+):
+
+    for k in range(
+        j - 1,
+        -1,
+        -1
+    ):
+
+        if np.isfinite(
+            values[k]
+        ):
+
+            return float(
+                values[k]
+            )
+
+    return np.nan
+
+
+# ============================================================
+# NEAREST NEXT VALUE
+# ============================================================
+
+def get_nearest_right(
+    values,
+    j
+):
+
+    for k in range(
+        j + 1,
+        len(values)
+    ):
+
+        if np.isfinite(
+            values[k]
+        ):
+
+            return float(
+                values[k]
+            )
+
+    return np.nan
+
+
+# ============================================================
+# NEIGHBOUR PREDICTION
+# ============================================================
+
+def neighbour_prediction(
+    values,
+    j
+):
+
+    left = get_nearest_left(
+        values,
+        j
+    )
+
+    right = get_nearest_right(
+        values,
+        j
+    )
+
+    if (
+        np.isfinite(left)
+        and
+        np.isfinite(right)
+    ):
+
+        return (
+            left + right
+        ) / 2.0
+
+    if np.isfinite(left):
+
+        return left
+
+    if np.isfinite(right):
+
+        return right
+
+    return np.nan
+
+
+# ============================================================
+# BUILD MODEL PREDICTION
+# ============================================================
+
+def build_prediction(
+    values,
+    j,
+    world_model,
+    global_mean
+):
+
+    prediction = np.nan
+
+    # --------------------------------------------------------
+    # 1. WORLD MODEL
+    # --------------------------------------------------------
+
+    if j >= 3:
+
+        state = values[
+            j - 3:j
+        ]
+
+        if not np.isnan(
+            state
+        ).any():
+
+            prediction = safe_predict(
+                world_model,
+                state
+            )
+
+    # --------------------------------------------------------
+    # 2. NEIGHBOUR FALLBACK
+    # --------------------------------------------------------
+
+    if not np.isfinite(
+        prediction
+    ):
+
+        prediction = neighbour_prediction(
+            values,
+            j
+        )
+
+    # --------------------------------------------------------
+    # 3. ROW MEAN FALLBACK
+    # --------------------------------------------------------
+
+    if not np.isfinite(
+        prediction
+    ):
+
+        row_mean = np.nanmean(
+            values
+        )
+
+        if np.isfinite(
+            row_mean
+        ):
+
+            prediction = float(
+                row_mean
+            )
+
+    # --------------------------------------------------------
+    # 4. GLOBAL MEAN FALLBACK
+    # --------------------------------------------------------
+
+    if not np.isfinite(
+        prediction
+    ):
+
+        prediction = float(
+            global_mean
+        )
+
+    return float(
+        prediction
+    )
+
+
+# ============================================================
+# STEP 5A — IMPUTE EXISTING COUNTRIES
+# ============================================================
+
+def impute_existing_country_missing_values(
+    df,
+    world_model,
+    year_cols=None,
+    alpha=0.08,
+    episodes=200
+):
+
+    """
+    Fill only originally missing values.
+
+    Observed values are NEVER modified.
+    """
+
+    if year_cols is None:
+
+        year_cols = AFRICA_YEARS
+
+    work = make_numeric_year_data(
+        df,
+        year_cols
+    )
+
+    # --------------------------------------------------------
+    # ORIGINAL MISSING MASK
+    # --------------------------------------------------------
+
+    original_missing = (
+        work[
+            year_cols
+        ]
+        .isna()
+        .copy()
+    )
+
+    global_mean = robust_global_mean(
+        work,
+        year_cols
+    )
+
+    imputed_count = 0
+
+    # --------------------------------------------------------
+    # PROCESS EACH COUNTRY
+    # --------------------------------------------------------
+
+    for idx in work.index:
+
+        # IMPORTANT:
+        # copy=True makes the NumPy array writable.
+        values = (
+            work.loc[
+                idx,
+                year_cols
+            ]
+            .to_numpy(
+                dtype=float,
+                copy=True
+            )
+        )
+
+        mask = (
+            original_missing
+            .loc[
+                idx,
+                year_cols
+            ]
+            .to_numpy(
+                dtype=bool,
+                copy=True
+            )
+        )
+
+        if not mask.any():
+
+            continue
+
+        # ----------------------------------------------------
+        # MODEL-BASED RL + ONLINE OPTIMIZATION
+        # ----------------------------------------------------
+
+        for _ in range(
+            int(episodes)
+        ):
+
+            previous = values.copy()
+
+            for j in range(
+                len(values)
+            ):
+
+                # NEVER MODIFY OBSERVED VALUES
+                if not mask[j]:
+
+                    continue
+
+                prediction = build_prediction(
+
+                    values=values,
+
+                    j=j,
+
+                    world_model=world_model,
+
+                    global_mean=global_mean
+                )
+
+                if not np.isfinite(
+                    prediction
+                ):
+
+                    continue
+
+                # ------------------------------------------------
+                # INITIAL MODEL-BASED UPDATE
+                # ------------------------------------------------
+
+                if not np.isfinite(
+                    values[j]
+                ):
+
+                    values[j] = prediction
+
+                # ------------------------------------------------
+                # ONLINE OPTIMIZATION UPDATE
+                # ------------------------------------------------
+
+                else:
+
+                    values[j] = (
+
+                        values[j]
+
+                        +
+
+                        float(alpha)
+                        *
+                        (
+                            prediction
+                            -
+                            values[j]
+                        )
+
+                    )
+
+            # ----------------------------------------------------
+            # CONVERGENCE
+            # ----------------------------------------------------
+
+            finite_mask = np.isfinite(
+                values
+            )
+
+            if finite_mask.any():
+
+                difference = np.max(
+
+                    np.abs(
+
+                        values[
+                            finite_mask
+                        ]
+
+                        -
+
+                        previous[
+                            finite_mask
+                        ]
+
+                    )
+
+                )
+
+            else:
+
+                difference = 0.0
+
+            if difference < 1e-6:
+
+                break
+
+        # ----------------------------------------------------
+        # WRITE BACK
+        # ----------------------------------------------------
+
+        work.loc[
+            idx,
+            year_cols
+        ] = np.round(
+            values,
+            3
+        )
+
+        imputed_count += int(
+            mask.sum()
+        )
+
+    return (
+        work,
+        imputed_count
+    )
+
+
+# ============================================================
+# COUNTRY-SPECIFIC RANDOM GENERATOR
+# ============================================================
+
+def stable_country_rng(
+    country_code,
+    random_seed=42
+):
+
+    """
+    Creates a reproducible random generator for each
+    African ISO-3 country.
+
+    Therefore:
+
+        ZAF != NGA != AGO
+
+    rather than every completely missing country receiving
+    exactly the same initial values.
+    """
+
+    key = (
+        f"{country_code}|{random_seed}"
+        .encode("utf-8")
+    )
+
+    digest = hashlib.sha256(
+        key
+    ).hexdigest()
+
+    seed = int(
+        digest[:16],
+        16
+    ) % (
+        2**32 - 1
+    )
+
+    return np.random.default_rng(
+        seed
+    )
+
+
+# ============================================================
+# ESTIMATE INITIAL STATE
 # ============================================================
 
 def estimate_country_initial_state(
     reference_df,
     year_cols,
-    country_code
+    country_code,
+    random_seed=42
 ):
+
     """
-    Estimate a distinct initial 2015-2017 state for a
-    completely missing country.
+    Estimate 2015, 2016 and 2017 for a completely
+    missing country.
 
-    The model has no actual observations for a country that
-    is completely absent. Therefore, its initial state is
-    sampled reproducibly from the empirical distributions
-    of African countries already present in the dataset.
+    Empirical bootstrap + small stochastic perturbation.
 
-    The country ISO-3 code creates a deterministic seed so
-    different countries receive different starting states.
+    This prevents all completely missing countries from
+    receiving identical initial values.
     """
 
-    data = reference_df[
+    data = make_numeric_year_data(
+        reference_df,
         year_cols
-    ].apply(
-        pd.to_numeric,
-        errors="coerce"
     )
 
-    # --------------------------------------------------------
-    # Reproducible country-specific random generator
-    # --------------------------------------------------------
-
-    seed_bytes = hashlib.sha256(
-        country_code.encode(
-            "utf-8"
-        )
-    ).digest()
-
-    seed = int.from_bytes(
-        seed_bytes[:8],
-        byteorder="little"
-    ) % (2**32 - 1)
-
-    rng = np.random.default_rng(
-        seed
+    rng = stable_country_rng(
+        country_code,
+        random_seed
     )
-
-    global_values = data.to_numpy(
-        dtype=float
-    )
-
-    global_mean = np.nanmean(
-        global_values
-    )
-
-    if np.isnan(global_mean):
-        global_mean = 0.0
 
     initial_values = []
 
     # --------------------------------------------------------
-    # Estimate each of first three years independently
+    # 2015, 2016, 2017
     # --------------------------------------------------------
 
     for year in year_cols[:3]:
 
-        column = pd.to_numeric(
-            data[year],
-            errors="coerce"
-        ).dropna()
-
-        if len(column) == 0:
-            initial_values.append(
-                global_mean
+        series = (
+            data[year]
+            .dropna()
+            .to_numpy(
+                dtype=float
             )
+        )
+
+        series = series[
+            np.isfinite(series)
+        ]
+
+        if len(series) == 0:
+
+            initial_values.append(
+                np.nan
+            )
+
             continue
 
         # ----------------------------------------------------
-        # Bootstrap empirical observation
+        # COUNTRY-SPECIFIC EMPIRICAL BOOTSTRAP
         # ----------------------------------------------------
 
-        selected = float(
+        value = float(
             rng.choice(
-                column.to_numpy()
+                series
             )
         )
 
-        # Small controlled perturbation prevents identical
-        # values while keeping the estimate near the empirical
-        # distribution.
-        std = float(
-            column.std()
-        )
+        # ----------------------------------------------------
+        # SMALL COUNTRY-SPECIFIC PERTURBATION
+        # ----------------------------------------------------
 
-        if np.isnan(std):
-            std = 0.0
+        if len(series) >= 3:
 
-        perturbation = rng.normal(
-            0,
-            max(
-                abs(selected) * 0.02,
-                std * 0.02,
-                1e-9
+            std = float(
+                np.nanstd(
+                    series
+                )
             )
-        )
 
-        value = selected + perturbation
+            if (
+                np.isfinite(std)
+                and
+                std > 0
+            ):
 
-        # Prevent negative values when the underlying dataset
-        # represents non-negative quantities.
-        if column.min() >= 0:
-            value = max(
-                0.0,
-                value
-            )
+                value += float(
+
+                    rng.normal(
+                        0.0,
+                        std * 0.02
+                    )
+
+                )
 
         initial_values.append(
-            float(value)
+            value
         )
+
+    # --------------------------------------------------------
+    # GLOBAL FALLBACK
+    # --------------------------------------------------------
+
+    global_mean = robust_global_mean(
+        data,
+        year_cols
+    )
+
+    initial_values = [
+
+        global_mean
+        if not np.isfinite(value)
+        else value
+
+        for value
+        in initial_values
+
+    ]
 
     return np.asarray(
         initial_values,
@@ -395,7 +860,7 @@ def estimate_country_initial_state(
 
 
 # ============================================================
-# GENERATE COMPLETELY MISSING COUNTRY TRAJECTORY
+# STEP 5B — GENERATE COMPLETELY MISSING COUNTRY
 # ============================================================
 
 def generate_missing_country_trajectory(
@@ -404,23 +869,23 @@ def generate_missing_country_trajectory(
     year_cols,
     country_code,
     alpha=0.08,
-    episodes=200
+    episodes=200,
+    random_seed=42
 ):
+
     """
-    Generate a complete 2015-2025 trajectory for a country
+    Generate complete 2015-2025 trajectory for a country
     that is completely absent from the uploaded dataset.
-
-    Model-Based RL:
-        Previous three years -> predicted next year
-
-    Online Optimization:
-        x_new = x_old + alpha(prediction - x_old)
     """
 
-    if len(year_cols) < 4:
-        raise ValueError(
-            "At least four years are required."
-        )
+    data = make_numeric_year_data(
+        reference_df,
+        year_cols
+    )
+
+    # --------------------------------------------------------
+    # CREATE WRITABLE ARRAY
+    # --------------------------------------------------------
 
     values = np.full(
         len(year_cols),
@@ -429,49 +894,60 @@ def generate_missing_country_trajectory(
     )
 
     # --------------------------------------------------------
-    # Country-specific initial state
+    # INITIAL STATE
     # --------------------------------------------------------
 
-    initial_values = estimate_country_initial_state(
-        reference_df,
-        year_cols,
-        country_code
+    values[:3] = (
+        estimate_country_initial_state(
+
+            reference_df=data,
+
+            year_cols=year_cols,
+
+            country_code=country_code,
+
+            random_seed=random_seed
+
+        )
     )
 
-    values[:3] = initial_values
+    global_mean = robust_global_mean(
+        data,
+        year_cols
+    )
 
     # --------------------------------------------------------
-    # Model-Based RL trajectory
+    # GENERATE 2018-2025
     # --------------------------------------------------------
 
     for j in range(
         3,
-        len(values)
+        len(year_cols)
     ):
 
         state = values[
             j - 3:j
         ]
 
-        if np.isnan(state).any():
-            continue
-
-        prediction = safe_prediction(
+        prediction = safe_predict(
             world_model,
             state
         )
 
-        if np.isnan(prediction):
-            continue
+        if not np.isfinite(
+            prediction
+        ):
+
+            prediction = global_mean
 
         values[j] = prediction
 
     # --------------------------------------------------------
-    # Online Optimization
+    # ONLINE OPTIMIZATION
     # --------------------------------------------------------
 
     for _ in range(
-        episodes
+        int(episodes)
     ):
 
         previous = values.copy()
@@ -485,37 +961,51 @@ def generate_missing_country_trajectory(
                 j - 3:j
             ]
 
-            if np.isnan(state).any():
+            if np.isnan(
+                state
+            ).any():
+
                 continue
 
-            prediction = safe_prediction(
+            prediction = safe_predict(
                 world_model,
                 state
             )
 
-            if np.isnan(prediction):
+            if not np.isfinite(
+                prediction
+            ):
+
                 continue
 
             values[j] = (
+
                 values[j]
-                + alpha
-                * (
+
+                +
+
+                float(alpha)
+                *
+                (
                     prediction
-                    - values[j]
+                    -
+                    values[j]
                 )
+
             )
 
-        difference = np.nanmax(
+        difference = np.max(
+
             np.abs(
                 values
-                - previous
+                -
+                previous
             )
+
         )
 
-        if (
-            np.isnan(difference)
-            or difference < 1e-6
-        ):
+        if difference < 1e-6:
+
             break
 
     return np.round(
@@ -525,314 +1015,57 @@ def generate_missing_country_trajectory(
 
 
 # ============================================================
-# IMPUTE MISSING VALUES FOR EXISTING COUNTRIES
-# ============================================================
-
-def impute_existing_country_missing_values(
-    df,
-    world_model,
-    year_cols,
-    alpha=0.08,
-    episodes=200
-):
-    """
-    Impute missing years for countries already present.
-
-    IMPORTANT:
-    Existing observed values are NEVER changed.
-    Only originally missing values are updated.
-    """
-
-    result = df.copy()
-
-    # --------------------------------------------------------
-    # Ensure numeric years
-    # --------------------------------------------------------
-
-    for col in year_cols:
-        result[col] = pd.to_numeric(
-            result[col],
-            errors="coerce"
-        )
-
-    # --------------------------------------------------------
-    # Original missing-value mask
-    # --------------------------------------------------------
-
-    original_missing = (
-        result[year_cols]
-        .isna()
-    )
-
-    total_imputed = 0
-
-    # --------------------------------------------------------
-    # Process each country
-    # --------------------------------------------------------
-
-    for idx in result.index:
-
-        values = result.loc[
-            idx,
-            year_cols
-        ].to_numpy(
-            dtype=float
-        )
-
-        mask = original_missing.loc[
-            idx,
-            year_cols
-        ].to_numpy(
-            dtype=bool
-        )
-
-        for _ in range(
-            episodes
-        ):
-
-            previous = values.copy()
-
-            for j in range(
-                len(values)
-            ):
-
-                # NEVER modify observed values
-                if not mask[j]:
-                    continue
-
-                prediction = np.nan
-
-                # =================================================
-                # 1. WORLD MODEL
-                # =================================================
-
-                if j >= 3:
-
-                    state = values[
-                        j - 3:j
-                    ]
-
-                    if not np.isnan(
-                        state
-                    ).any():
-
-                        prediction = safe_prediction(
-                            world_model,
-                            state
-                        )
-
-                # =================================================
-                # 2. NEAREST NEIGHBOURS
-                # =================================================
-
-                if np.isnan(
-                    prediction
-                ):
-
-                    left = None
-                    right = None
-
-                    for k in range(
-                        j - 1,
-                        -1,
-                        -1
-                    ):
-
-                        if not np.isnan(
-                            values[k]
-                        ):
-
-                            left = values[k]
-                            break
-
-                    for k in range(
-                        j + 1,
-                        len(values)
-                    ):
-
-                        if not np.isnan(
-                            values[k]
-                        ):
-
-                            right = values[k]
-                            break
-
-                    if (
-                        left is not None
-                        and right is not None
-                    ):
-
-                        prediction = (
-                            left + right
-                        ) / 2.0
-
-                    elif left is not None:
-
-                        prediction = left
-
-                    elif right is not None:
-
-                        prediction = right
-
-                # =================================================
-                # 3. ROW MEAN
-                # =================================================
-
-                if np.isnan(
-                    prediction
-                ):
-
-                    valid_values = values[
-                        ~np.isnan(values)
-                    ]
-
-                    if len(
-                        valid_values
-                    ) > 0:
-
-                        prediction = float(
-                            np.mean(
-                                valid_values
-                            )
-                        )
-
-                # =================================================
-                # 4. GLOBAL MEAN
-                # =================================================
-
-                if np.isnan(
-                    prediction
-                ):
-
-                    all_values = (
-                        result[year_cols]
-                        .to_numpy(
-                            dtype=float
-                        )
-                    )
-
-                    prediction = float(
-                        np.nanmean(
-                            all_values
-                        )
-                    )
-
-                # =================================================
-                # CRITICAL FIX
-                # =================================================
-
-                if not np.isnan(
-                    prediction
-                ):
-
-                    prediction = float(
-                        np.asarray(
-                            prediction
-                        ).reshape(-1)[0]
-                    )
-
-                    # First assignment
-                    if np.isnan(
-                        values[j]
-                    ):
-
-                        values[j] = prediction
-
-                    # Online optimization
-                    else:
-
-                        values[j] = (
-                            values[j]
-                            + alpha
-                            * (
-                                prediction
-                                - values[j]
-                            )
-                        )
-
-                    total_imputed += 1
-
-            # ----------------------------------------------------
-            # Convergence
-            # ----------------------------------------------------
-
-            if np.all(
-                ~np.isnan(values)
-            ):
-                break
-
-            valid_difference = (
-                np.abs(
-                    values
-                    - previous
-                )
-            )
-
-            valid_difference = (
-                valid_difference[
-                    ~np.isnan(
-                        valid_difference
-                    )
-                ]
-            )
-
-            if len(
-                valid_difference
-            ) == 0:
-                break
-
-            if np.max(
-                valid_difference
-            ) < 1e-6:
-                break
-
-        # --------------------------------------------------------
-        # Save country
-        # --------------------------------------------------------
-
-        result.loc[
-            idx,
-            year_cols
-        ] = np.round(
-            values,
-            3
-        )
-
-    return result, total_imputed
-
-
-# ============================================================
-# BUILD COMPLETELY MISSING AFRICAN COUNTRIES
+# ADD COMPLETELY MISSING AFRICAN COUNTRIES
 # ============================================================
 
 def add_missing_african_countries(
     df,
     missing_countries,
     world_model,
-    year_cols,
+    year_cols=None,
     alpha=0.08,
-    episodes=200
+    episodes=200,
+    random_seed=42
 ):
+
     """
-    Create and populate countries that are completely absent
-    from the uploaded dataset.
+    Add completely missing African countries.
+
+    Existing countries remain unchanged except for their
+    originally missing year values, which should already have
+    been imputed.
     """
 
-    if not missing_countries:
-        return df.copy()
+    if year_cols is None:
 
-    added_rows = []
+        year_cols = AFRICA_YEARS
+
+    result = make_numeric_year_data(
+        df,
+        year_cols
+    ).copy()
+
+    generated_rows = []
 
     for country in missing_countries:
 
         trajectory = (
             generate_missing_country_trajectory(
+
                 world_model=world_model,
-                reference_df=df,
+
+                reference_df=result,
+
                 year_cols=year_cols,
+
                 country_code=country,
+
                 alpha=alpha,
-                episodes=episodes
+
+                episodes=episodes,
+
+                random_seed=random_seed
+
             )
         )
 
@@ -840,105 +1073,203 @@ def add_missing_african_countries(
             "geoUnit": country
         }
 
-        for j, year in enumerate(
-            year_cols
+        for year, value in zip(
+            year_cols,
+            trajectory
         ):
 
             row[year] = float(
-                trajectory[j]
+                value
             )
 
-        added_rows.append(
+        generated_rows.append(
             row
         )
 
-    added_df = pd.DataFrame(
-        added_rows
-    )
+    if generated_rows:
 
-    # --------------------------------------------------------
-    # Preserve original columns
-    # --------------------------------------------------------
+        added_df = pd.DataFrame(
+            generated_rows
+        )
 
-    output = df.copy()
+        # ----------------------------------------------------
+        # PRESERVE NON-YEAR COLUMNS
+        # ----------------------------------------------------
 
-    for col in year_cols:
+        for column in result.columns:
 
-        if col not in output.columns:
-            output[col] = np.nan
+            if column not in added_df.columns:
 
-    # Ensure country column is first
-    columns = [
-        "geoUnit"
-    ] + [
-        c for c in output.columns
-        if c != "geoUnit"
-    ]
+                added_df[column] = np.nan
 
-    output = output[
-        columns
-    ]
+        # Ensure exactly the same column order.
+        added_df = added_df[
+            result.columns
+        ]
 
-    # Add missing countries
-    output = pd.concat(
-        [
-            output,
-            added_df
-        ],
-        ignore_index=True
-    )
+        result = pd.concat(
 
-    return output
+            [
+                result,
+                added_df
+            ],
+
+            ignore_index=True
+
+        )
+
+    return result
 
 
 # ============================================================
-# MAIN STREAMLIT APPLICATION
+# COUNT MISSING VALUES
+# ============================================================
+
+def count_missing_values(
+    df,
+    year_cols
+):
+
+    numeric = make_numeric_year_data(
+        df,
+        year_cols
+    )
+
+    return int(
+        numeric[
+            year_cols
+        ]
+        .isna()
+        .sum()
+        .sum()
+    )
+
+
+# ============================================================
+# BEFORE / AFTER
+# ============================================================
+
+def compare_missing_before_after(
+    before_df,
+    after_df,
+    year_cols
+):
+
+    before = int(
+
+        make_numeric_year_data(
+            before_df,
+            year_cols
+        )[year_cols]
+        .isna()
+        .sum()
+        .sum()
+
+    )
+
+    after = int(
+
+        make_numeric_year_data(
+            after_df,
+            year_cols
+        )[year_cols]
+        .isna()
+        .sum()
+        .sum()
+
+    )
+
+    return before, after
+
+
+# ============================================================
+# TRAJECTORY DIAGNOSTICS
+# ============================================================
+
+def trajectory_variation_table(
+    df,
+    countries,
+    year_cols
+):
+
+    subset = df[
+        df["geoUnit"]
+        .astype(str)
+        .isin(countries)
+    ][
+        ["geoUnit"] + year_cols
+    ].copy()
+
+    if subset.empty:
+
+        return subset
+
+    subset[
+        "Unique trajectory values"
+    ] = subset[
+        year_cols
+    ].nunique(
+        axis=1
+    )
+
+    return subset
+
+
+# ============================================================
+# APPLICATION TITLE
 # ============================================================
 
 st.title(
-    "🔄 African Model-Based RL Imputer"
+    "🔄 Model-Based RL + Online Optimization Imputer"
 )
 
 st.markdown(
     """
-    ### Model-Based Reinforcement Learning + Online Optimization
+This application performs **Model-Based Reinforcement Learning +
+Online Optimization** for African country data.
 
-    Upload an Excel dataset containing African countries and
-    annual observations. The application:
+### Processing stages
 
-    1. Detects missing years for countries already present.
-    2. Trains a country-level temporal World Model.
-    3. Imputes missing years using Model-Based RL.
-    4. Applies online optimization.
-    5. Detects completely missing African countries.
-    6. Generates 2015–2025 trajectories for those countries.
-    7. Produces a downloadable Excel workbook.
-    """
+**Stage 1**
+Existing African countries are retained and only their missing
+2015–2025 values are imputed.
+
+**Stage 2**
+Completely absent African ISO-3 countries are detected and added.
+
+**Stage 3**
+A country-level temporal world model generates their missing
+trajectories.
+
+**Stage 4**
+Online optimization iteratively refines the generated values.
+
+> Completely absent countries are model-generated estimates, not
+> observed values.
+"""
 )
 
 
 # ============================================================
-# SIDEBAR SETTINGS
+# SIDEBAR
 # ============================================================
 
 st.sidebar.header(
     "⚙️ Model Settings"
 )
 
-start_year = st.sidebar.number_input(
+st.sidebar.number_input(
     "Start year",
-    min_value=1900,
-    max_value=2100,
-    value=2015,
-    step=1
+    min_value=2015,
+    max_value=2015,
+    value=2015
 )
 
-end_year = st.sidebar.number_input(
+st.sidebar.number_input(
     "End year",
-    min_value=1900,
-    max_value=2100,
-    value=2025,
-    step=1
+    min_value=2025,
+    max_value=2025,
+    value=2025
 )
 
 n_estimators = st.sidebar.slider(
@@ -965,13 +1296,25 @@ episodes = st.sidebar.slider(
     step=10
 )
 
+random_seed = st.sidebar.number_input(
+    "Random seed",
+    min_value=0,
+    max_value=999999,
+    value=42,
+    step=1
+)
+
+st.sidebar.info(
+    "African coverage: 2015–2025."
+)
+
 
 # ============================================================
-# UPLOAD EXCEL
+# EXCEL UPLOAD
 # ============================================================
 
 uploaded_file = st.file_uploader(
-    "📁 Upload Excel dataset",
+    "📂 Upload Excel dataset",
     type=[
         "xlsx",
         "xls"
@@ -979,526 +1322,971 @@ uploaded_file = st.file_uploader(
 )
 
 
+if uploaded_file is None:
+
+    st.info(
+        "Upload an Excel file containing a 'geoUnit' "
+        "column and year columns 2015–2025."
+    )
+
+    st.stop()
+
+
 # ============================================================
-# APPLICATION AFTER UPLOAD
+# READ EXCEL
 # ============================================================
 
-if uploaded_file is not None:
+try:
 
-    try:
+    df = pd.read_excel(
+        uploaded_file
+    )
 
-        # ------------------------------------------------------
-        # READ EXCEL
-        # ------------------------------------------------------
+    df = normalize_columns(
+        df
+    )
 
-        if uploaded_file.name.lower().endswith(
-            ".xls"
-        ):
+    validate_dataset(
+        df,
+        country_col="geoUnit"
+    )
 
-            df = pd.read_excel(
-                uploaded_file,
-                engine="xlrd"
-            )
+except Exception as e:
 
-        else:
+    st.error(
+        "The application encountered an error "
+        "while reading the uploaded dataset."
+    )
 
-            df = pd.read_excel(
-                uploaded_file,
-                engine="openpyxl"
-            )
+    st.exception(
+        e
+    )
 
-        # ------------------------------------------------------
-        # NORMALIZE COLUMN NAMES
-        # ------------------------------------------------------
+    st.stop()
 
-        df.columns = [
-            str(c).strip()
-            for c in df.columns
-        ]
 
-        # ------------------------------------------------------
-        # CHECK COUNTRY COLUMN
-        # ------------------------------------------------------
+# ============================================================
+# DATASET SUMMARY
+# ============================================================
 
-        if "geoUnit" not in df.columns:
+st.subheader(
+    "📊 Uploaded Dataset"
+)
 
-            st.error(
-                "The uploaded Excel file must contain "
-                "a 'geoUnit' column containing ISO-3 "
-                "country codes."
-            )
+col1, col2, col3 = st.columns(3)
 
-            st.stop()
+with col1:
 
-        # ------------------------------------------------------
-        # DETECT YEARS
-        # ------------------------------------------------------
+    st.metric(
+        "Rows",
+        len(df)
+    )
 
-        year_cols = detect_year_columns(
+with col2:
+
+    st.metric(
+        "Columns",
+        len(df.columns)
+    )
+
+with col3:
+
+    st.metric(
+        "Missing year values",
+        count_missing_values(
             df,
-            start_year=int(start_year),
-            end_year=int(end_year)
+            AFRICA_YEARS
         )
+    )
 
-        if len(year_cols) < 4:
 
-            st.error(
-                "At least four annual columns are required "
-                "for Model-Based RL."
-            )
+with st.expander(
+    "View uploaded data"
+):
 
-            st.stop()
+    st.dataframe(
+        df,
+        use_container_width=True
+    )
 
-        # ------------------------------------------------------
-        # Convert year values
-        # ------------------------------------------------------
 
-        for col in year_cols:
+# ============================================================
+# AFRICAN COUNTRY COVERAGE
+# ============================================================
 
-            df[col] = pd.to_numeric(
-                df[col],
-                errors="coerce"
-            )
+st.subheader(
+    "🌍 African Country Coverage"
+)
 
-        # ------------------------------------------------------
-        # DATASET INFORMATION
-        # ------------------------------------------------------
+missing_countries = (
+    detect_missing_african_countries(
+        df,
+        "geoUnit"
+    )
+)
 
-        st.subheader(
-            "📊 Uploaded Dataset"
-        )
 
-        col1, col2, col3 = st.columns(3)
+existing_africa = set(
 
-        with col1:
-            st.metric(
-                "Rows",
-                len(df)
-            )
+    df["geoUnit"]
+    .dropna()
+    .astype(str)
+    .str.strip()
+    .str.upper()
 
-        with col2:
-            st.metric(
-                "Columns",
-                len(df.columns)
-            )
+)
 
-        with col3:
-            st.metric(
-                "Years detected",
-                len(year_cols)
-            )
 
-        st.write(
-            "Detected years:"
-        )
+existing_africa_count = len(
 
-        st.write(
-            ", ".join(year_cols)
-        )
+    existing_africa
+    &
+    ALL_AFRICA
 
-        # ------------------------------------------------------
-        # PREVIEW
-        # ------------------------------------------------------
+)
 
-        with st.expander(
-            "View uploaded dataset"
-        ):
 
-            st.dataframe(
-                df,
-                use_container_width=True
-            )
+c1, c2, c3 = st.columns(3)
 
-        # ======================================================
-        # STEP 1 — DETECT MISSING AFRICAN COUNTRIES
-        # ======================================================
+with c1:
 
-        st.subheader(
-            "🌍 African Country Coverage"
-        )
+    st.metric(
+        "African countries expected",
+        len(ALL_AFRICA)
+    )
 
-        missing_countries = (
-            detect_missing_african_countries(
-                df,
-                "geoUnit"
-            )
-        )
+with c2:
 
-        if missing_countries:
+    st.metric(
+        "African countries present",
+        existing_africa_count
+    )
 
-            st.warning(
-                f"{len(missing_countries)} African "
-                "countries are completely absent "
-                "from the uploaded dataset."
-            )
+with c3:
 
-            st.dataframe(
-                pd.DataFrame({
-                    "ISO-3":
-                    missing_countries
-                }),
-                use_container_width=True
-            )
+    st.metric(
+        "Completely missing",
+        len(missing_countries)
+    )
 
-        else:
 
-            st.success(
-                "All African ISO-3 countries are present."
-            )
+if missing_countries:
 
-        # ======================================================
-        # STEP 2 — TRAIN WORLD MODEL
-        # ======================================================
+    st.warning(
 
-        st.subheader(
-            "🧠 Country-Level World Model"
-        )
+        f"{len(missing_countries)} African countries "
+        "are completely absent from the uploaded dataset."
 
-        progress = st.progress(
-            0
-        )
+    )
 
-        status = st.empty()
+    st.dataframe(
 
-        status.info(
-            "Training temporal World Model..."
-        )
+        pd.DataFrame({
+
+            "ISO-3":
+            missing_countries
+
+        }),
+
+        use_container_width=True
+
+    )
+
+else:
+
+    st.success(
+        "All African ISO-3 countries are present."
+    )
+
+
+# ============================================================
+# TRAIN COUNTRY WORLD MODEL
+# ============================================================
+
+st.subheader(
+    "🧠 Country-Level World Model"
+)
+
+try:
+
+    with st.spinner(
+        "Training Random Forest world model..."
+    ):
 
         world_model, training_samples = (
             train_country_world_model(
-                df=df,
+
+                df,
+
                 country_col="geoUnit",
-                year_cols=year_cols,
-                n_estimators=int(
-                    n_estimators
-                )
+
+                year_cols=AFRICA_YEARS,
+
+                n_estimators=n_estimators
+
             )
         )
 
-        progress.progress(
-            25
-        )
+    st.success(
+        "Country-level World Model trained successfully."
+    )
 
-        st.success(
-            "Country-level World Model "
-            "trained successfully."
-        )
+    st.info(
+        f"Temporal training samples: "
+        f"{training_samples:,}"
+    )
 
-        st.info(
-            f"Temporal training samples: "
-            f"{training_samples:,}"
-        )
+except ValueError as e:
 
-        # ======================================================
-        # STEP 3 — IMPUTE EXISTING COUNTRIES
-        # ======================================================
+    st.error(
+        f"World Model training failed: {e}"
+    )
 
-        st.subheader(
-            "🔄 Imputing Missing Years"
-        )
+    st.stop()
 
-        status.info(
-            "Step 1/2: Imputing missing years "
-            "for countries already present..."
-        )
 
-        df_imputed, existing_imputed_count = (
-            impute_existing_country_missing_values(
-                df=df,
-                world_model=world_model,
-                year_cols=year_cols,
-                alpha=float(alpha),
-                episodes=int(episodes)
-            )
-        )
+# ============================================================
+# RUN BUTTON
+# ============================================================
 
-        progress.progress(
-            60
-        )
+run_button = st.button(
 
-        st.success(
-            "Existing-country missing values "
-            "completed."
-        )
+    "🚀 Run Model-Based RL + Online Optimization",
 
-        st.metric(
-            "Existing-country values imputed",
-            existing_imputed_count
-        )
+    type="primary",
 
-        # ======================================================
-        # STEP 4 — ADD COMPLETELY MISSING AFRICAN COUNTRIES
-        # ======================================================
+    use_container_width=True
 
-        st.subheader(
-            "🌍 Adding Completely Missing African Countries"
-        )
+)
 
-        status.info(
-            "Step 2/2: Generating trajectories "
-            "for missing African countries..."
-        )
 
-        df_final = add_missing_african_countries(
-            df=df_imputed,
-            missing_countries=missing_countries,
+if not run_button:
+
+    st.info(
+        "Click the button above to start imputation."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# PROGRESS
+# ============================================================
+
+st.subheader(
+    "🔄 Imputing Missing Years"
+)
+
+progress = st.progress(
+    0
+)
+
+status = st.empty()
+
+
+# ============================================================
+# STEP 1 — EXISTING COUNTRIES
+# ============================================================
+
+try:
+
+    status.info(
+
+        "Step 1/2: Imputing missing years "
+        "for countries already present..."
+
+    )
+
+    (
+        df_existing_imputed,
+        existing_imputed_count
+    ) = (
+
+        impute_existing_country_missing_values(
+
+            df=df,
+
             world_model=world_model,
-            year_cols=year_cols,
-            alpha=float(alpha),
-            episodes=int(episodes)
+
+            year_cols=AFRICA_YEARS,
+
+            alpha=alpha,
+
+            episodes=episodes
+
         )
 
-        progress.progress(
-            100
+    )
+
+    progress.progress(
+        50
+    )
+
+except Exception as e:
+
+    st.error(
+        "The application encountered an error "
+        "while imputing existing countries."
+    )
+
+    st.exception(
+        e
+    )
+
+    st.stop()
+
+
+# ============================================================
+# STEP 2 — COMPLETELY MISSING COUNTRIES
+# ============================================================
+
+try:
+
+    status.info(
+
+        "Step 2/2: Generating trajectories for "
+        "completely missing African countries..."
+
+    )
+
+    df_final = (
+        add_missing_african_countries(
+
+            df=df_existing_imputed,
+
+            missing_countries=missing_countries,
+
+            world_model=world_model,
+
+            year_cols=AFRICA_YEARS,
+
+            alpha=alpha,
+
+            episodes=episodes,
+
+            random_seed=int(
+                random_seed
+            )
+
+        )
+    )
+
+    progress.progress(
+        100
+    )
+
+except Exception as e:
+
+    st.error(
+        "The application encountered an error "
+        "while adding completely missing countries."
+    )
+
+    st.exception(
+        e
+    )
+
+    st.stop()
+
+
+status.success(
+    "Model-Based RL + Online Optimization completed."
+)
+
+
+# ============================================================
+# FINAL RESULTS
+# ============================================================
+
+st.subheader(
+    "📈 Imputation Results"
+)
+
+
+before_missing, after_missing = (
+    compare_missing_before_after(
+
+        df,
+
+        df_final,
+
+        AFRICA_YEARS
+
+    )
+)
+
+
+m1, m2, m3, m4, m5 = st.columns(5)
+
+
+with m1:
+
+    st.metric(
+        "African countries added",
+        len(missing_countries)
+    )
+
+
+with m2:
+
+    st.metric(
+        "Final number of countries",
+        len(df_final)
+    )
+
+
+with m3:
+
+    st.metric(
+        "World-model samples",
+        training_samples
+    )
+
+
+with m4:
+
+    st.metric(
+        "Missing before",
+        before_missing
+    )
+
+
+with m5:
+
+    st.metric(
+        "Missing after",
+        after_missing
+    )
+
+
+# ============================================================
+# PRESERVE OBSERVED VALUES CHECK
+# ============================================================
+
+st.subheader(
+    "🔒 Observed-Value Preservation Check"
+)
+
+
+original_numeric = (
+    make_numeric_year_data(
+        df,
+        AFRICA_YEARS
+    )
+)
+
+
+final_numeric = (
+    make_numeric_year_data(
+        df_final,
+        AFRICA_YEARS
+    )
+)
+
+
+original_numeric[
+    "_country_key"
+] = (
+
+    original_numeric[
+        "geoUnit"
+    ]
+    .astype(str)
+    .str.strip()
+    .str.upper()
+
+)
+
+
+final_numeric[
+    "_country_key"
+] = (
+
+    final_numeric[
+        "geoUnit"
+    ]
+    .astype(str)
+    .str.strip()
+    .str.upper()
+
+)
+
+
+original_indexed = (
+
+    original_numeric
+    .drop_duplicates(
+        "_country_key"
+    )
+    .set_index(
+        "_country_key"
+    )
+
+)
+
+
+final_indexed = (
+
+    final_numeric
+    .drop_duplicates(
+        "_country_key"
+    )
+    .set_index(
+        "_country_key"
+    )
+
+)
+
+
+preserved = True
+
+changed_observed_cells = 0
+
+
+for country in original_indexed.index:
+
+    if country not in final_indexed.index:
+
+        continue
+
+    for year in AFRICA_YEARS:
+
+        original_value = (
+            original_indexed
+            .loc[
+                country,
+                year
+            ]
         )
 
-        status.success(
-            "Processing completed."
+        final_value = (
+            final_indexed
+            .loc[
+                country,
+                year
+            ]
         )
 
-        # ======================================================
-        # STEP 5 — RESULTS
-        # ======================================================
+        if np.isfinite(
+            original_value
+        ):
 
-        st.subheader(
-            "📈 Imputation Results"
-        )
+            if (
 
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-
-            st.metric(
-                "African countries added",
-                len(missing_countries)
-            )
-
-        with col2:
-
-            st.metric(
-                "Final number of countries",
-                len(df_final)
-            )
-
-        with col3:
-
-            st.metric(
-                "World-model samples",
-                training_samples
-            )
-
-        with col4:
-
-            remaining_missing = int(
-                df_final[
-                    year_cols
-                ].isna().sum().sum()
-            )
-
-            st.metric(
-                "Remaining missing values",
-                remaining_missing
-            )
-
-        # ======================================================
-        # SHOW ADDED COUNTRIES
-        # ======================================================
-
-        if missing_countries:
-
-            st.subheader(
-                "➕ Added African Countries"
-            )
-
-            added_display = df_final[
-                df_final[
-                    "geoUnit"
-                ].isin(
-                    missing_countries
+                not np.isfinite(
+                    final_value
                 )
-            ][
-                [
-                    "geoUnit"
-                ] + year_cols
-            ]
 
-            st.dataframe(
-                added_display,
-                use_container_width=True
-            )
+                or
 
-        # ======================================================
-        # SHOW COMPLETE RESULT
-        # ======================================================
+                not np.isclose(
 
-        st.subheader(
-            "📋 Final Imputed Dataset"
-        )
+                    float(
+                        original_value
+                    ),
 
-        st.dataframe(
+                    float(
+                        final_value
+                    ),
+
+                    rtol=1e-9,
+
+                    atol=1e-9
+
+                )
+
+            ):
+
+                preserved = False
+
+                changed_observed_cells += 1
+
+
+if preserved:
+
+    st.success(
+
+        "All originally observed year values were preserved. "
+        "Only missing values were imputed."
+
+    )
+
+else:
+
+    st.error(
+
+        f"{changed_observed_cells} originally observed "
+        "cells appear to have changed."
+
+    )
+
+
+# ============================================================
+# GENERATED AFRICAN COUNTRY TRAJECTORIES
+# ============================================================
+
+if missing_countries:
+
+    st.subheader(
+        "🌍 Generated Trajectories for Added African Countries"
+    )
+
+    generated_table = (
+        trajectory_variation_table(
+
             df_final,
-            use_container_width=True
+
+            missing_countries,
+
+            AFRICA_YEARS
+
+        )
+    )
+
+
+    st.dataframe(
+
+        generated_table,
+
+        use_container_width=True
+
+    )
+
+
+    # --------------------------------------------------------
+    # CHECK FOR IDENTICAL TRAJECTORIES
+    # --------------------------------------------------------
+
+    duplicate_trajectories = (
+
+        generated_table
+        .duplicated(
+            subset=AFRICA_YEARS,
+            keep=False
+        )
+        .sum()
+
+    )
+
+
+    if duplicate_trajectories == 0:
+
+        st.success(
+
+            "Each added African country has a distinct "
+            "2015–2025 generated trajectory."
+
         )
 
-        # ======================================================
-        # MISSING VALUE CHECK
-        # ======================================================
+    else:
 
-        st.subheader(
-            "🔍 Missing-Value Validation"
+        st.warning(
+
+            f"{duplicate_trajectories} generated rows share "
+            "a complete trajectory."
+
         )
 
-        missing_before = int(
-            df[
-                year_cols
-            ].isna().sum().sum()
-        )
 
-        missing_after = int(
-            df_final[
-                year_cols
-            ].isna().sum().sum()
-        )
+# ============================================================
+# FINAL DATASET
+# ============================================================
 
-        validation_df = pd.DataFrame({
-            "Metric": [
-                "Missing values before",
-                "Missing values after",
-                "Values imputed"
-            ],
-            "Value": [
-                missing_before,
-                missing_after,
-                missing_before
-                - missing_after
-            ]
-        })
+st.subheader(
+    "📋 Final Imputed African Dataset"
+)
 
-        st.dataframe(
-            validation_df,
-            use_container_width=True,
-            hide_index=True
-        )
 
-        if missing_after == 0:
+st.dataframe(
 
-            st.success(
-                "✅ All 2015–2025 missing values "
-                "have been populated."
-            )
+    df_final,
 
-        else:
+    use_container_width=True
 
-            st.warning(
-                f"{missing_after} missing values "
-                "remain."
-            )
+)
 
-        # ======================================================
-        # CREATE EXCEL OUTPUT
-        # ======================================================
 
-        output = io.BytesIO()
+# ============================================================
+# MISSING VALUES AFTER IMPUTATION
+# ============================================================
 
-        with pd.ExcelWriter(
-            output,
-            engine="openpyxl"
-        ) as writer:
+st.subheader(
+    "🔎 Missing Values After Imputation"
+)
 
-            # --------------------------------------------------
-            # Sheet 1
-            # --------------------------------------------------
 
-            df_final.to_excel(
-                writer,
-                index=False,
-                sheet_name="Imputed_Africa"
-            )
+missing_after_by_year = (
 
-            # --------------------------------------------------
-            # Sheet 2
-            # --------------------------------------------------
+    df_final[
+        AFRICA_YEARS
+    ]
+    .isna()
+    .sum()
+    .rename(
+        "Missing values"
+    )
+    .to_frame()
 
-            pd.DataFrame({
-                "Missing African Countries":
-                missing_countries
-            }).to_excel(
-                writer,
-                index=False,
-                sheet_name="Added_Countries"
-            )
+)
 
-            # --------------------------------------------------
-            # Sheet 3
-            # --------------------------------------------------
 
-            validation_df.to_excel(
-                writer,
-                index=False,
-                sheet_name="Validation"
-            )
+st.dataframe(
 
-            # --------------------------------------------------
-            # Sheet 4 — Model Settings
-            # --------------------------------------------------
+    missing_after_by_year,
 
-            settings_df = pd.DataFrame({
-                "Parameter": [
-                    "Start Year",
-                    "End Year",
-                    "Random Forest Trees",
-                    "Online Optimization Alpha",
-                    "Optimization Episodes",
-                    "World Model Training Samples",
-                    "Existing Country Values Imputed",
-                    "African Countries Added"
-                ],
-                "Value": [
-                    start_year,
-                    end_year,
-                    n_estimators,
-                    alpha,
-                    episodes,
-                    training_samples,
-                    existing_imputed_count,
-                    len(missing_countries)
-                ]
-            })
+    use_container_width=True
 
-            settings_df.to_excel(
-                writer,
-                index=False,
-                sheet_name="Model_Settings"
-            )
+)
 
-        output.seek(
-            0
-        )
 
-        # ======================================================
-        # DOWNLOAD
-        # ======================================================
+# ============================================================
+# DOWNLOAD EXCEL
+# ============================================================
 
-        st.download_button(
-            label=(
-                "⬇️ Download Imputed African Excel"
-            ),
-            data=output.getvalue(),
-            file_name=(
-                "Africa_Model_Based_RL_"
-                "Online_Optimization_Imputed.xlsx"
-            ),
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            )
-        )
+st.subheader(
+    "💾 Download Results"
+)
 
-    except Exception as e:
 
-        st.error(
-            "The application encountered an error "
-            "while processing the uploaded dataset."
-        )
+output = io.BytesIO()
 
-        st.exception(e)
+
+with pd.ExcelWriter(
+
+    output,
+
+    engine="openpyxl"
+
+) as writer:
+
+    # --------------------------------------------------------
+    # FINAL DATA
+    # --------------------------------------------------------
+
+    df_final.to_excel(
+
+        writer,
+
+        index=False,
+
+        sheet_name="Imputed_Africa"
+
+    )
+
+    # --------------------------------------------------------
+    # ADDED COUNTRIES
+    # --------------------------------------------------------
+
+    pd.DataFrame({
+
+        "Missing African Countries":
+        missing_countries
+
+    }).to_excel(
+
+        writer,
+
+        index=False,
+
+        sheet_name="Added_Countries"
+
+    )
+
+    # --------------------------------------------------------
+    # MISSING AFTER
+    # --------------------------------------------------------
+
+    missing_after_by_year.to_excel(
+
+        writer,
+
+        sheet_name="Missing_After"
+
+    )
+
+
+output.seek(0)
+
+
+st.download_button(
+
+    label=(
+        "⬇️ Download Imputed African Excel"
+    ),
+
+    data=output.getvalue(),
+
+    file_name=(
+        "Africa_Model_Based_RL_"
+        "Online_Optimization_Imputed.xlsx"
+    ),
+
+    mime=(
+        "application/vnd.openxmlformats-officedocument."
+        "spreadsheetml.sheet"
+    ),
+
+    use_container_width=True
+
+)
+
+
+# ============================================================
+# METHODOLOGY
+# ============================================================
+
+with st.expander(
+    "📚 Methodology used by this application"
+):
+
+    st.markdown(
+        r"""
+## 1. Country-level temporal World Model
+
+The temporal state is defined as:
+
+\[
+s_t =
+[x_{t-3},x_{t-2},x_{t-1}]
+\]
+
+The Random Forest world model learns:
+
+\[
+\hat{x}_t =
+f_\theta(s_t)
+\]
+
+where \(f_\theta\) represents the learned country-level
+environment/world model.
+
+For example:
+
+\[
+[2015,2016,2017]
+\rightarrow
+2018
+\]
+
+and:
+
+\[
+[2016,2017,2018]
+\rightarrow
+2019
+\]
+
+---
+
+## 2. Existing African countries
+
+For countries already present in the uploaded dataset, the
+algorithm records the original missing-value mask.
+
+Only cells that were originally missing are updated.
+
+Observed values remain unchanged.
+
+---
+
+## 3. Model-Based RL update
+
+For a missing year, the world model generates:
+
+\[
+\hat{x}_t =
+f_\theta(s_t)
+\]
+
+The estimated value becomes the candidate action/state update.
+
+---
+
+## 4. Online Optimization
+
+The optimization step is:
+
+\[
+x_t^{k+1}
+=
+x_t^k
++
+\alpha
+\left(
+\hat{x}_t-x_t^k
+\right)
+\]
+
+where:
+
+- \(x_t^k\) = current estimate
+- \(\hat{x}_t\) = world-model prediction
+- \(\alpha\) = online optimization learning rate
+
+---
+
+## 5. Completely missing African countries
+
+A completely absent country has no observed 2015–2017 values.
+
+Therefore, those values cannot be directly learned from that
+country itself.
+
+The application estimates its initial state using empirical
+African-country distributions.
+
+Each ISO-3 country receives a deterministic country-specific
+random seed.
+
+Consequently, the generated trajectories can differ between
+countries instead of every missing country receiving exactly
+the same trajectory.
+
+---
+
+## 6. Recursive trajectory generation
+
+Once the country-specific initial state is established:
+
+\[
+[2015,2016,2017]
+\rightarrow
+2018
+\]
+
+then:
+
+\[
+[2016,2017,2018]
+\rightarrow
+2019
+\]
+
+and so forth until:
+
+\[
+2025
+\]
+
+---
+
+## 7. Important interpretation
+
+For completely missing countries, the generated observations are
+**model estimates**.
+
+They should therefore be labelled as imputed/synthetic values in
+a research dataset rather than presented as directly observed
+statistics.
+"""
+    )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.caption(
+    "Model-Based RL + Online Optimization | "
+    "African ISO-3 Coverage | 2015–2025"
+)
