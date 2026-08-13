@@ -1,555 +1,577 @@
-from pathlib import Path
-import zipfile, py_compile, textwrap, os
+# ==========================================
+# MODEL-BASED RL + ONLINE OPTIMIZATION
+# AFRICAN COUNTRY DATA IMPUTER
+# STREAMLIT APPLICATION
+# ==========================================
 
-app_path = Path("/mnt/data/app.py")
-
-app_code = r'''
-import io
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
+import io
+
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+
+# ==========================================
+# PAGE CONFIGURATION
+# ==========================================
 
 st.set_page_config(
-    page_title="Model-Based RL + Online Optimization",
-    page_icon="📊",
+    page_title="African Data Model-Based RL Imputer",
+    page_icon="🌍",
     layout="wide"
 )
 
-st.title("📊 Model-Based RL + Online Optimization")
-st.write(
-    "Upload an Excel file, detect annual columns automatically, "
-    "impute missing values, validate the model, and download the result."
-)
 
-# -----------------------------
-# SETTINGS
-# -----------------------------
-st.sidebar.header("Settings")
-start_year = st.sidebar.number_input(
-    "Start year", min_value=1900, max_value=2100, value=2015, step=1
-)
-end_year = st.sidebar.number_input(
-    "End year", min_value=1900, max_value=2100, value=2025, step=1
-)
-n_estimators = st.sidebar.slider(
-    "Random Forest trees", min_value=100, max_value=1000, value=500, step=50
-)
-alpha = st.sidebar.slider(
-    "Online optimization α", min_value=0.01, max_value=0.50, value=0.08, step=0.01
-)
-episodes = st.sidebar.slider(
-    "Optimization iterations", min_value=10, max_value=500, value=100, step=10
-)
+# ==========================================
+# 1. AFRICAN COUNTRIES — ISO-3
+# ==========================================
 
-# -----------------------------
-# HELPERS
-# -----------------------------
-def detect_country_column(columns):
-    candidates = [
-        "geoUnit", "country", "Country",
-        "country_name", "Country Name", "Entity"
-    ]
-    for col in candidates:
-        if col in columns:
-            return col
-    return None
+ALL_AFRICA = {
+    "DZA", "AGO", "BEN", "BWA", "BFA", "BDI", "CPV", "CMR",
+    "CAF", "TCD", "COM", "COG", "COD", "CIV", "DJI", "EGY",
+    "GNQ", "ERI", "SWZ", "ETH", "GAB", "GMB", "GHA", "GIN",
+    "GNB", "KEN", "LSO", "LBR", "LBY", "MDG", "MWI", "MLI",
+    "MRT", "MUS", "MAR", "MOZ", "NAM", "NER", "NGA", "RWA",
+    "STP", "SEN", "SYC", "SLE", "SOM", "ZAF", "SSD", "SDN",
+    "TZA", "TGO", "TUN", "UGA", "ZMB", "ZWE"
+}
 
 
-def load_excel(uploaded_file):
-    df = pd.read_excel(uploaded_file)
-    df.columns = df.columns.astype(str).str.strip()
+# ==========================================
+# AFRICA ANALYSIS YEARS
+# ==========================================
 
-    country_col = detect_country_column(df.columns)
-    if country_col is None:
-        raise ValueError(
-            "Country column not detected. Expected one of: "
-            "geoUnit, country, Country, country_name, Country Name, Entity."
-        )
+AFRICA_YEARS = [
+    str(year)
+    for year in range(2015, 2026)
+]
 
-    year_cols = sorted(
-        [
-            c for c in df.columns
-            if c.isdigit() and start_year <= int(c) <= end_year
-        ],
-        key=int
+
+# ==========================================
+# CHECK AFRICA CONFIGURATION
+# ==========================================
+
+if len(ALL_AFRICA) != 54:
+    raise RuntimeError(
+        f"Expected 54 African countries, "
+        f"but found {len(ALL_AFRICA)}."
     )
 
-    if not year_cols:
+
+# ==========================================
+# 2. DETECT MISSING AFRICAN COUNTRIES
+# ==========================================
+
+def detect_missing_african_countries(
+    df,
+    country_col="geoUnit"
+):
+    """
+    Compare countries in the uploaded dataset
+    against the complete African ISO-3 country list.
+
+    Returns a sorted list of African countries
+    that are completely absent from the dataset.
+    """
+
+    if country_col not in df.columns:
+
         raise ValueError(
-            f"No year columns found between {start_year} and {end_year}."
+            f"Required country column "
+            f"'{country_col}' was not found."
         )
 
+    existing = set(
+        df[country_col]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    missing = sorted(
+        ALL_AFRICA - existing
+    )
+
+    return missing
+
+
+# ==========================================
+# 3. CREATE MISSING AFRICAN COUNTRIES TABLE
+# ==========================================
+
+def create_missing_africa_table(
+    missing_countries,
+    year_cols=None
+):
+    """
+    Create an empty table for African countries
+    that are completely absent from the dataset.
+
+    Values from 2015–2025 are initialized as NaN.
+    """
+
+    if year_cols is None:
+        year_cols = AFRICA_YEARS
+
+    missing_table = pd.DataFrame({
+        "geoUnit": missing_countries
+    })
+
+    for year in year_cols:
+        missing_table[year] = np.nan
+
+    return missing_table
+
+
+# ==========================================
+# 4. TRAIN COUNTRY-LEVEL WORLD MODEL
+# ==========================================
+
+def train_country_world_model(
+    df,
+    country_col="geoUnit",
+    year_cols=None,
+    n_estimators=500
+):
+    """
+    Train a cross-country temporal World Model.
+
+    The model learns:
+
+        [t-3, t-2, t-1] -> t
+
+    using temporal observations from all countries
+    available in the uploaded dataset.
+
+    This allows the model to generate a trajectory
+    for a completely missing African country.
+    """
+
+    if year_cols is None:
+        year_cols = AFRICA_YEARS
+
+    data = df.copy()
+
+    # --------------------------------------
+    # Validate year columns
+    # --------------------------------------
+
     for col in year_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
 
-    return df, country_col, year_cols
+        if col not in data.columns:
 
+            raise ValueError(
+                f"Required year column '{col}' "
+                "was not found."
+            )
 
-def train_world_model(df, year_cols):
-    X, y = [], []
+        data[col] = pd.to_numeric(
+            data[col],
+            errors="coerce"
+        )
 
-    for _, row in df.iterrows():
-        values = row[year_cols].to_numpy(dtype=float)
+    X = []
+    y = []
 
-        # Temporal state:
-        # [t-3, t-2, t-1] -> t
-        for j in range(3, len(values)):
-            state = values[j - 3:j]
-            target = values[j]
+    # --------------------------------------
+    # Create temporal training samples
+    # --------------------------------------
 
-            if np.all(np.isfinite(state)) and np.isfinite(target):
-                X.append(state.tolist())
-                y.append(float(target))
+    for _, row in data.iterrows():
 
-    if len(X) < 10:
-        return None, 0
+        values = row[year_cols].to_numpy(
+            dtype=float
+        )
 
-    X = np.asarray(X, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
+        for i in range(3, len(values)):
+
+            state = values[i - 3:i]
+
+            target = values[i]
+
+            # Require three complete previous years
+            if np.isnan(state).any():
+                continue
+
+            # Target must be available
+            if np.isnan(target):
+                continue
+
+            X.append(state)
+            y.append(target)
+
+    X = np.asarray(
+        X,
+        dtype=float
+    )
+
+    y = np.asarray(
+        y,
+        dtype=float
+    )
+
+    # --------------------------------------
+    # Validate training samples
+    # --------------------------------------
+
+    if len(X) < 5:
+
+        raise ValueError(
+            "Not enough complete temporal observations "
+            "to train the world model."
+        )
+
+    # --------------------------------------
+    # Train Random Forest World Model
+    # --------------------------------------
 
     model = RandomForestRegressor(
         n_estimators=n_estimators,
         random_state=42,
         n_jobs=-1
     )
-    model.fit(X, y)
+
+    model.fit(
+        X,
+        y
+    )
 
     return model, len(X)
 
 
-def nearest_neighbor_prediction(values, position, global_mean):
-    left = None
-    right = None
+# ==========================================
+# MAIN STREAMLIT APPLICATION
+# ==========================================
 
-    for k in range(position - 1, -1, -1):
-        if np.isfinite(values[k]):
-            left = float(values[k])
-            break
+st.title(
+    "🌍 Model-Based RL + Online Optimization"
+)
 
-    for k in range(position + 1, len(values)):
-        if np.isfinite(values[k]):
-            right = float(values[k])
-            break
+st.header(
+    "African Country Missing Data Imputer"
+)
 
-    if left is not None and right is not None:
-        return (left + right) / 2.0
-
-    if left is not None:
-        return left
-
-    if right is not None:
-        return right
-
-    row_mean = np.nanmean(values)
-    if np.isfinite(row_mean):
-        return float(row_mean)
-
-    return float(global_mean)
-
-
-def safe_prediction(model, state):
-    """Always return a scalar float or NaN."""
-    pred = model.predict(np.asarray(state, dtype=np.float64).reshape(1, -1))
-    pred = np.asarray(pred).reshape(-1)
-
-    if pred.size == 0:
-        return np.nan
-
-    value = float(pred[0])
-
-    return value if np.isfinite(value) else np.nan
+st.write(
+    """
+    Upload an Excel dataset and the application will:
+    
+    1. Detect African countries completely missing
+       from the dataset.
+    2. Detect missing yearly observations.
+    3. Train a cross-country temporal World Model.
+    4. Generate missing country trajectories.
+    5. Apply Model-Based Reinforcement Learning.
+    6. Apply Online Optimization.
+    7. Produce a completed African dataset for
+       2015–2025.
+    """
+)
 
 
-def impute_dataframe(df, year_cols, model):
-    result = df.copy()
+# ==========================================
+# FILE UPLOAD
+# ==========================================
 
-    # IMPORTANT:
-    # Preserve exactly which cells were missing in the user's upload.
-    original_missing = result[year_cols].isna().copy()
-
-    numeric_matrix = result[year_cols].to_numpy(
-        dtype=np.float64, copy=True
-    )
-
-    global_mean = np.nanmean(numeric_matrix)
-
-    if not np.isfinite(global_mean):
-        global_mean = 0.0
-
-    for row_number in range(len(result)):
-        # Explicit float array prevents:
-        # "setting an array element with a sequence"
-        values = np.asarray(
-            numeric_matrix[row_number],
-            dtype=np.float64
-        ).copy()
-
-        missing_mask = np.asarray(
-            original_missing.iloc[row_number].to_numpy(),
-            dtype=bool
-        )
-
-        if not missing_mask.any():
-            continue
-
-        for _ in range(episodes):
-            previous = values.copy()
-
-            for j in range(len(values)):
-                # Never modify an originally observed value.
-                if not missing_mask[j]:
-                    continue
-
-                prediction = np.nan
-
-                # -----------------------------
-                # WORLD MODEL
-                # -----------------------------
-                if model is not None and j >= 3:
-                    state = values[j - 3:j]
-
-                    if np.all(np.isfinite(state)):
-                        prediction = safe_prediction(model, state)
-
-                # -----------------------------
-                # FALLBACK
-                # -----------------------------
-                if not np.isfinite(prediction):
-                    prediction = nearest_neighbor_prediction(
-                        values, j, global_mean
-                    )
-
-                if not np.isfinite(prediction):
-                    prediction = float(global_mean)
-
-                # -----------------------------
-                # MODEL-BASED RL + ONLINE UPDATE
-                # -----------------------------
-                if not np.isfinite(values[j]):
-                    values[j] = float(prediction)
-                else:
-                    updated = (
-                        values[j]
-                        + alpha * (float(prediction) - values[j])
-                    )
-
-                    if np.isfinite(updated):
-                        values[j] = float(updated)
-
-            finite_values = values[np.isfinite(values)]
-
-            if len(finite_values) == len(values):
-                break
-
-            if np.all(np.isfinite(previous)) and np.all(np.isfinite(values)):
-                diff = np.max(np.abs(values - previous))
-                if diff < 1e-6:
-                    break
-
-        numeric_matrix[row_number] = values
-
-    result.loc[:, year_cols] = np.round(numeric_matrix, 3)
-
-    return result
-
-
-def validation(df, year_cols, model):
-    if model is None:
-        return None
-
-    rng = np.random.default_rng(42)
-    actual = []
-    predicted = []
-
-    for _, row in df.iterrows():
-        values = row[year_cols].to_numpy(dtype=float)
-
-        candidates = [
-            j for j in range(3, len(values))
-            if np.isfinite(values[j])
-            and np.all(np.isfinite(values[j - 3:j]))
-        ]
-
-        if not candidates:
-            continue
-
-        test_count = max(1, int(0.20 * len(candidates)))
-        test_positions = rng.choice(
-            candidates,
-            size=min(test_count, len(candidates)),
-            replace=False
-        )
-
-        for j in test_positions:
-            pred = safe_prediction(model, values[j - 3:j])
-
-            if np.isfinite(pred):
-                actual.append(float(values[j]))
-                predicted.append(float(pred))
-
-    if len(actual) < 2:
-        return None
-
-    mae = mean_absolute_error(actual, predicted)
-    rmse = np.sqrt(mean_squared_error(actual, predicted))
-    r2 = r2_score(actual, predicted) if len(set(actual)) > 1 else np.nan
-
-    return {
-        "MAE": float(mae),
-        "RMSE": float(rmse),
-        "R²": float(r2),
-        "Validation samples": len(actual)
-    }
-
-
-# -----------------------------
-# APPLICATION
-# -----------------------------
 uploaded_file = st.file_uploader(
-    "Upload your Excel file",
+    "📂 Upload your Excel file",
     type=["xlsx", "xls"]
 )
 
-if uploaded_file is None:
-    st.info("Upload an Excel file to begin.")
-    st.markdown(
-        """
-        **Expected format**
 
-        `geoUnit | 2015 | 2016 | ... | 2025`
+# ==========================================
+# PROCESS UPLOADED FILE
+# ==========================================
 
-        Existing values are preserved. Only cells that were missing in
-        the uploaded file are imputed.
-        """
-    )
-else:
+if uploaded_file is not None:
+
+    # ======================================
+    # READ EXCEL FILE
+    # ======================================
+
     try:
-        df, country_col, year_cols = load_excel(uploaded_file)
 
-        before_missing = int(
-            df[year_cols].isna().sum().sum()
+        df = pd.read_excel(
+            uploaded_file
         )
 
-        st.success(f"File loaded: {uploaded_file.name}")
+    except Exception as e:
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Rows", len(df))
-        c2.metric("Detected years", len(year_cols))
-        c3.metric("Missing values", before_missing)
+        st.error(
+            f"Unable to read Excel file: {e}"
+        )
 
-        st.write("**Country column:**", country_col)
-        st.write("**Detected years:**", ", ".join(year_cols))
+        st.stop()
 
-        with st.expander("View uploaded dataset"):
-            st.dataframe(df, use_container_width=True)
 
-        if st.button(
-            "🚀 Run Model-Based RL + Online Optimization",
-            type="primary"
-        ):
-            with st.spinner("Training temporal world model..."):
-                world_model, training_samples = train_world_model(
-                    df, year_cols
-                )
+    # ======================================
+    # STANDARDIZE COLUMN NAMES
+    # ======================================
 
-            if world_model is None:
-                st.error(
-                    "Not enough complete temporal sequences to train "
-                    "the world model. At least 10 training samples are required."
-                )
-                st.stop()
+    df.columns = (
+        df.columns
+        .astype(str)
+        .str.strip()
+    )
 
-            st.info(
-                f"World model trained using "
-                f"{training_samples:,} temporal training samples."
+
+    # ======================================
+    # SHOW UPLOADED DATASET
+    # ======================================
+
+    st.subheader(
+        "📊 Uploaded Dataset"
+    )
+
+    st.write(
+        f"Rows: {df.shape[0]:,}"
+    )
+
+    st.write(
+        f"Columns: {df.shape[1]:,}"
+    )
+
+    st.dataframe(
+        df.head(20),
+        use_container_width=True
+    )
+
+
+    # ======================================
+    # CHECK COUNTRY COLUMN
+    # ======================================
+
+    if "geoUnit" not in df.columns:
+
+        st.error(
+            """
+            The uploaded Excel file must contain
+            a column named `geoUnit`.
+
+            Example:
+
+            geoUnit | 2015 | 2016 | ... | 2025
+            """
+        )
+
+        st.stop()
+
+
+    # ======================================
+    # CHECK YEAR COLUMNS
+    # ======================================
+
+    missing_year_columns = [
+        year
+        for year in AFRICA_YEARS
+        if year not in df.columns
+    ]
+
+
+    if missing_year_columns:
+
+        st.error(
+            "The following required year columns "
+            f"are missing: {missing_year_columns}"
+        )
+
+        st.stop()
+
+
+    # ======================================
+    # CONVERT YEAR VALUES TO NUMERIC
+    # ======================================
+
+    for year in AFRICA_YEARS:
+
+        df[year] = pd.to_numeric(
+            df[year],
+            errors="coerce"
+        )
+
+
+    # ======================================
+    # STEP 2
+    # DETECT COMPLETELY MISSING COUNTRIES
+    # ======================================
+
+    st.subheader(
+        "🌍 Step 2 — African Country Coverage"
+    )
+
+    try:
+
+        missing_countries = (
+            detect_missing_african_countries(
+                df,
+                country_col="geoUnit"
             )
+        )
 
-            with st.spinner(
-                "Imputing missing values and running online optimization..."
-            ):
-                df_imputed = impute_dataframe(
-                    df, year_cols, world_model
-                )
+    except ValueError as e:
 
-            after_missing = int(
-                df_imputed[year_cols].isna().sum().sum()
-            )
-            filled = before_missing - after_missing
+        st.error(
+            str(e)
+        )
 
-            st.subheader("Results")
+        st.stop()
 
-            r1, r2, r3 = st.columns(3)
-            r1.metric("Missing BEFORE", before_missing)
-            r2.metric("Missing AFTER", after_missing)
-            r3.metric("Values filled", filled)
 
-            if after_missing == 0:
-                st.success("All missing year values were successfully filled.")
-            else:
-                st.warning(
-                    f"{after_missing} values remain missing because the "
-                    "uploaded data did not provide enough usable information."
-                )
+    if len(missing_countries) > 0:
 
-            st.subheader("Imputed Dataset")
-            st.dataframe(df_imputed, use_container_width=True, height=500)
+        st.warning(
+            f"{len(missing_countries)} African "
+            "countries are completely absent "
+            "from the uploaded dataset."
+        )
 
-            metrics = validation(
-                df, year_cols, world_model
-            )
+        missing_display = pd.DataFrame({
+            "Missing African ISO-3":
+                missing_countries
+        })
 
-            if metrics:
-                st.subheader("Validation Metrics")
+        st.dataframe(
+            missing_display,
+            use_container_width=True
+        )
 
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("MAE", f"{metrics['MAE']:.4f}")
-                m2.metric("RMSE", f"{metrics['RMSE']:.4f}")
+    else:
 
-                if np.isfinite(metrics["R²"]):
-                    m3.metric("R²", f"{metrics['R²']:.4f}")
-                else:
-                    m3.metric("R²", "N/A")
+        st.success(
+            "All 54 African countries are present "
+            "in the uploaded dataset."
+        )
 
-                m4.metric(
-                    "Validation samples",
-                    metrics["Validation samples"]
-                )
 
-            # -----------------------------
-            # DOWNLOAD EXCEL
-            # -----------------------------
-            output = io.BytesIO()
+    # ======================================
+    # STEP 3
+    # CREATE MISSING COUNTRY TABLE
+    # ======================================
 
-            with pd.ExcelWriter(
-                output,
-                engine="openpyxl"
-            ) as writer:
+    st.subheader(
+        "📋 Step 3 — Missing Country Table"
+    )
 
-                df.to_excel(
-                    writer,
-                    sheet_name="Original_Data",
-                    index=False
-                )
+    missing_table = (
+        create_missing_africa_table(
+            missing_countries,
+            AFRICA_YEARS
+        )
+    )
 
-                df_imputed.to_excel(
-                    writer,
-                    sheet_name="Imputed_Data",
-                    index=False
-                )
 
-                summary_data = {
-                    "Metric": [
-                        "Original missing values",
-                        "Remaining missing values",
-                        "Values filled",
-                        "Training samples",
-                        "Start year",
-                        "End year",
-                        "Random Forest trees",
-                        "Online optimization alpha",
-                        "Optimization iterations"
-                    ],
-                    "Value": [
-                        before_missing,
-                        after_missing,
-                        filled,
-                        training_samples,
-                        start_year,
-                        end_year,
-                        n_estimators,
-                        alpha,
-                        episodes
-                    ]
-                }
+    if len(missing_table) > 0:
 
-                if metrics:
-                    summary_data["Metric"].extend([
-                        "Validation MAE",
-                        "Validation RMSE",
-                        "Validation R²",
-                        "Validation samples"
-                    ])
+        st.write(
+            """
+            These countries have no observations
+            in the uploaded dataset. Their
+            2015–2025 values will be generated
+            by the model.
+            """
+        )
 
-                    summary_data["Value"].extend([
-                        metrics["MAE"],
-                        metrics["RMSE"],
-                        metrics["R²"],
-                        metrics["Validation samples"]
-                    ])
+        st.dataframe(
+            missing_table,
+            use_container_width=True
+        )
 
-                pd.DataFrame(summary_data).to_excel(
-                    writer,
-                    sheet_name="Summary",
-                    index=False
-                )
+    else:
 
-            output.seek(0)
+        st.info(
+            "No completely missing African "
+            "countries were detected."
+        )
 
-            st.download_button(
-                label="⬇️ Download Imputed Excel File",
-                data=output.getvalue(),
-                file_name=(
-                    "Model_Based_RL_Online_Optimization_Imputed.xlsx"
-                ),
-                mime=(
-                    "application/vnd.openxmlformats-officedocument."
-                    "spreadsheetml.sheet"
+
+    # ======================================
+    # STEP 4
+    # TRAIN COUNTRY WORLD MODEL
+    # ======================================
+
+    st.subheader(
+        "🧠 Step 4 — Train Country World Model"
+    )
+
+    with st.spinner(
+        "Training cross-country World Model..."
+    ):
+
+        try:
+
+            world_model, training_samples = (
+                train_country_world_model(
+                    df,
+                    country_col="geoUnit",
+                    year_cols=AFRICA_YEARS,
+                    n_estimators=500
                 )
             )
 
             st.success(
-                "Processing complete. Your original and imputed datasets "
-                "are available in the Excel download."
+                "Country-level World Model "
+                "trained successfully."
             )
 
-    except Exception as e:
-        st.error(
-            "The uploaded file could not be processed. "
-            "Please check that it is a valid Excel file and that it contains "
-            "a country column and year columns."
-        )
+            st.info(
+                f"Temporal training samples: "
+                f"{training_samples:,}"
+            )
 
-        # Show a safe diagnostic to the user without exposing file contents.
-        st.exception(e)
-'''
+        except ValueError as e:
 
-app_path.write_text(app_code, encoding="utf-8")
+            st.error(
+                f"World Model training failed: {e}"
+            )
 
-# Verify Python syntax.
-py_compile.compile(str(app_path), doraise=True)
+            st.stop()
 
-req_path = Path("/mnt/data/requirements.txt")
-req_path.write_text(
-    "streamlit\npandas\nnumpy\nscikit-learn\nopenpyxl\nxlrd\n",
-    encoding="utf-8"
-)
 
-readme_path = Path("/mnt/data/README.md")
-readme_path.write_text(
-    """# Model-Based RL + Online Optimization Excel Imputer
+    # ======================================
+    # CURRENT MISSING VALUES
+    # ======================================
 
-Public Streamlit application for uploading an Excel file, detecting annual
-columns, imputing missing values, validating the temporal world model, and
-downloading the completed workbook.
+    st.subheader(
+        "📉 Current Missing Values"
+    )
 
-Expected format:
-`geoUnit | 2015 | 2016 | ... | 2025`
+    missing_by_year = (
+        df[AFRICA_YEARS]
+        .isna()
+        .sum()
+    )
 
-Existing observed values are preserved. Only originally missing cells are
-updated.
+    st.dataframe(
+        missing_by_year
+        .to_frame("Missing Values"),
+        use_container_width=True
+    )
 
-Deploy with Streamlit Community Cloud using `app.py` as the main file.
-""",
-    encoding="utf-8"
-)
 
-zip_path = Path("/mnt/data/model_based_rl_online_optimization_PUBLIC_FIXED_v2.zip")
-with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-    z.write(app_path, arcname="app.py")
-    z.write(req_path, arcname="requirements.txt")
-    z.write(readme_path, arcname="README.md")
+    total_missing = (
+        df[AFRICA_YEARS]
+        .isna()
+        .sum()
+        .sum()
+    )
 
-print("Fixed application created and syntax-checked successfully.")
-print(zip_path)
+    st.metric(
+        "Total Missing Values",
+        f"{total_missing:,}"
+    )
+
+
+    # ======================================
+    # MODEL STATUS
+    # ======================================
+
+    st.success(
+        """
+        Steps 1–4 completed successfully.
+
+        The cross-country World Model is now ready
+        to generate trajectories for completely
+        missing African countries.
+        """
+    )
