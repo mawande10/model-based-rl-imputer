@@ -23,7 +23,13 @@ The country column can also be named `country`, `Country`, `country_name`, `Coun
 pip install -r requirements.txt
 streamlit run app.py
 ```
+git clone https://github.com/yourname/africa-education-imputer.git
 
+cd africa-education-imputer
+
+pip install -r requirements.txt
+
+streamlit run app.py
 ## Make it public
 
 Create a public GitHub repository containing:
