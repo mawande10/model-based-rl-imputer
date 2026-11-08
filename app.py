@@ -1070,57 +1070,32 @@ else:
             # EXPORT
             # --------------------------------
 
-            output = io.BytesIO()
-
-               importance_df.to_excel(
-                    writer,
-                    sheet_name="Feature_Importance",
-                    index=False
-                )
-
+            with pd.ExcelWriter(
+                output,
+                engine="openpyxl"
+            ) as writer:
+            
                 df.to_excel(
                     writer,
                     sheet_name="Original_Data",
                     index=False
                 )
-
+            
                 df_imputed.to_excel(
                     writer,
                     sheet_name="Imputed_Data",
                     index=False
                 )
-
-                summary_df = pd.DataFrame(
-                    {
-                        "Metric": [
-                            "Missing Before",
-                            "Missing After",
-                            "Values Filled",
-                            "Training Samples",
-                            "Start Year",
-                            "End Year",
-                            "RandomForest Trees",
-                            "Alpha",
-                            "Episodes"
-                        ],
-
-                        "Value": [
-                            before_missing,
-                            after_missing,
-                            filled,
-                            training_samples,
-                            start_year,
-                            end_year,
-                            n_estimators,
-                            alpha,
-                            episodes
-                        ]
-                    }
-                )
-
+            
                 summary_df.to_excel(
                     writer,
                     sheet_name="Summary",
+                    index=False
+                )
+            
+                importance_df.to_excel(
+                    writer,
+                    sheet_name="Feature_Importance",
                     index=False
                 )
 
