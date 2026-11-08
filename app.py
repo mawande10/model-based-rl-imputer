@@ -185,6 +185,28 @@ def load_excel(uploaded_file):
         .astype(str)
         .str.strip()
     )
+    
+    COUNTRY_MAPPING = {
+        "Egypt, Arab Rep.": "Egypt",
+        "Arab Republic of Egypt": "Egypt",
+        "Egypt Arab Rep": "Egypt",
+        "Republic of South Africa": "South Africa",
+        "Federal Republic of Nigeria": "Nigeria",
+        "Kingdom of Morocco": "Morocco",
+        "People's Democratic Republic of Algeria": "Algeria"
+    }
+    
+    df[country_col] = (
+        df[country_col]
+        .replace(COUNTRY_MAPPING)
+    )
+    
+    df["Country_Clean"] = (
+        df[country_col]
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
 
     year_cols = sorted(
         [
@@ -252,10 +274,16 @@ def train_world_model(
     y = []
 
     training_df = df[
-        df[country_col].isin(
-            TOP5_AFRICA
-        )
-    ]
+    df["Country_Clean"].isin(
+        [
+            "NIGERIA",
+            "SOUTH AFRICA",
+            "EGYPT",
+            "ALGERIA",
+            "MOROCCO"
+        ]
+    )
+]
 
     for _, row in training_df.iterrows():
 
@@ -324,7 +352,17 @@ def train_world_model(
 
                 X.append(features)
                 y.append(target)
+    st.write(
+        "Training countries detected:"
+    )
 
+    st.write(
+        sorted(
+            training_df[country_col]
+            .unique()
+            .tolist()
+        )
+    )
     if len(X) < 10:
         return None, 0
 
@@ -513,8 +551,17 @@ def impute_dataframe(df, year_cols, model):
                 # -----------------------------
                 if not np.isfinite(prediction):
                     prediction = nearest_neighbor_prediction(
-                        values, j, global_mean
+                            values,
+                            j,
+                            global_mean
                     )
+
+                    if not np.isfinite(prediction):
+                    
+                        row_mean = np.nanmean(values)
+                    
+                        if np.isfinite(row_mean):
+                            prediction = row_mean
 
                 if not np.isfinite(prediction):
                     prediction = float(global_mean)
@@ -564,8 +611,14 @@ def validation(
     predicted = []
 
     validation_df = df[
-        df[country_col].isin(
-            TOP5_AFRICA
+        df["Country_Clean"].isin(
+            [
+                "NIGERIA",
+                "SOUTH AFRICA",
+                "EGYPT",
+                "ALGERIA",
+                "MOROCCO"
+            ]
         )
     ]
 
@@ -1019,10 +1072,11 @@ else:
 
             output = io.BytesIO()
 
-            with pd.ExcelWriter(
-                output,
-                engine="openpyxl"
-            ) as writer:
+               importance_df.to_excel(
+                    writer,
+                    sheet_name="Feature_Importance",
+                    index=False
+                )
 
                 df.to_excel(
                     writer,
